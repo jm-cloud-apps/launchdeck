@@ -6,6 +6,13 @@ import AppKit
 final class AppManager: ObservableObject {
     @Published private(set) var apps: [ManagedApp] = []
     @Published private(set) var statuses: [String: AppStatus] = [:]
+    /// Whether each app's launchd job is scheduled, for apps that have one.
+    /// Read back from launchd on every poll — launchd is the source of truth,
+    /// so flipping the job in a terminal shows up here too.
+    @Published private(set) var scheduled: [String: Bool] = [:]
+    /// Apps whose launchctl call is in flight. The switch is disabled while it
+    /// is, so a double-tap can't race two bootstraps against each other.
+    @Published private(set) var scheduleBusy: Set<String> = []
 
     /// Keeps a freshly-launched app showing "Starting" until its port comes up
     /// (or this deadline passes), so polling doesn't snap it back to "Stopped".
@@ -31,10 +38,13 @@ final class AppManager: ObservableObject {
 
     func refresh() {
         let apps = self.apps
+        let wantsSchedules = apps.contains { $0.schedule != nil }
         DispatchQueue.global(qos: .utility).async {
             let listening = Shell.listeningPorts()
+            let labels = wantsSchedules ? Shell.scheduledLaunchdLabels() : []
             DispatchQueue.main.async {
                 self.applyStatuses(apps: apps, listening: listening)
+                if wantsSchedules { self.applySchedules(apps: apps, labels: labels) }
             }
         }
     }
@@ -71,6 +81,68 @@ final class AppManager: ObservableObject {
                 status = .starting
             }
             statuses[app.id] = status
+        }
+    }
+
+    private func applySchedules(apps: [ManagedApp], labels: Set<String>) {
+        for app in apps {
+            guard let job = app.schedule else { continue }
+            // A toggle mid-flight owns the value until launchctl returns; the
+            // poll would otherwise snap the switch back for one cycle.
+            if scheduleBusy.contains(app.id) { continue }
+            scheduled[app.id] = labels.contains(job.label)
+        }
+    }
+
+    // MARK: - Scheduled jobs
+
+    /// Turn an app's launchd job on or off.
+    ///
+    /// Both halves are needed in both directions. Off = `bootout` (stop it now)
+    /// + `disable` (persist it, or login would load the agent straight back).
+    /// On = `enable` (clear that override, otherwise bootstrap is refused) +
+    /// `bootstrap`. Nothing is written to apps.json: the next poll reads the
+    /// truth back out of launchd.
+    func setScheduled(_ app: ManagedApp, enabled: Bool) {
+        guard let job = app.schedule, !scheduleBusy.contains(app.id) else { return }
+
+        let domain = "gui/$(id -u)"
+        let target = "\(domain)/\(job.label)"
+        let plist = job.expandedPlistPath
+        let command: String
+        if enabled {
+            guard FileManager.default.fileExists(atPath: plist) else {
+                // Nothing to bootstrap — the agent was never installed (or the
+                // repo moved). Say so in the log and leave the switch off.
+                appendLog(app, "SCHEDULE ON failed — no launch agent at \(plist). " +
+                               "Install it: cp scripts/\(job.label).plist ~/Library/LaunchAgents/")
+                scheduled[app.id] = false
+                return
+            }
+            command = "launchctl enable \(target); launchctl bootstrap \(domain) \(plist.shellQuoted)"
+        } else {
+            command = "launchctl bootout \(target); launchctl disable \(target)"
+        }
+
+        scheduleBusy.insert(app.id)
+        scheduled[app.id] = enabled          // optimistic; the poll corrects it
+        appendLog(app, "SCHEDULE \(enabled ? "ON" : "OFF") — \(job.label)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Shell.runLoginResult(command)
+            let actual = Shell.scheduledLaunchdLabels().contains(job.label)
+            DispatchQueue.main.async {
+                if actual != enabled {
+                    // bootout on an already-stopped job (and bootstrap on an
+                    // already-loaded one) exit non-zero harmlessly, so only a
+                    // wrong *end state* is worth reporting.
+                    let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.appendLog(app, "SCHEDULE \(enabled ? "ON" : "OFF") did not take" +
+                                        (detail.isEmpty ? "" : " — \(detail)"))
+                }
+                self.scheduled[app.id] = actual
+                self.scheduleBusy.remove(app.id)
+            }
         }
     }
 

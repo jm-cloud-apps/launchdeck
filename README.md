@@ -3,7 +3,9 @@
 A small native macOS app — a Steam-Deck-style control panel for your local dev
 projects. Each tile starts/stops a project and shows whether it's running.
 
-Ships configured for **QuantForge**, **Budgeteer**, and **Study App**.
+Ships configured for **QuantForge** (:5173), **Budgeteer** (:5174), **Study App**
+(:5180), **PlantForge** (:5190), **Elevator Clicker** (:5185), **Housing
+Calculator** (:4174), and **InventoryForge** (:4175).
 
 ## Build & run
 
@@ -32,6 +34,13 @@ there onto the Dock.
   overrides this.
 - **Restart** = Stop, wait for the ports to drain, then Start again.
 - **Open** opens the app's `url` in your browser.
+- **Scheduled jobs** — an app can also own a `launchd` timer job that runs with
+  no server and no port, so Start/Stop can't see it. Those get a switch at the
+  bottom of the tile (and an entry in the menu bar). InventoryForge's
+  *Background scans* is the one that ships: every run pops a real Chromium
+  window, so turning it off when you don't want that is the point. The switch
+  reads its state straight from `launchd` each poll — flip the job in a terminal
+  and the switch follows.
 - **Logs** — the `doc.text` button on each tile (and "View … log" in the menu)
   opens that app's log so you can see what happened, including failures like
   `npm: command not found`. Launch Deck also writes its own timestamped
@@ -49,7 +58,11 @@ Config lives in:
 ~/Library/Application Support/LaunchDeck/apps.json
 ```
 
-It's seeded on first run. Edit it and relaunch (or hit refresh). Each entry:
+It's seeded on first run. Edit it and relaunch (or hit refresh). Your edits are
+kept: when a new build adds apps to the defaults, they're **appended** to your
+config rather than overwriting it — and an app you delete stays deleted (a
+`seeded.json` ledger next to it records which defaults have already been
+offered). Each entry:
 
 ```json
 {
@@ -62,8 +75,18 @@ It's seeded on first run. Edit it and relaunch (or hit refresh). Each entry:
   "stopCommand": null,                  // null = kill the ports below
   "ports": [3000, 4000],                // used for status + default stop
   "readyPort": 3000,                    // the port that means "fully up"
-  "url": "http://localhost:3000"        // Open button (or null)
+  "url": "http://localhost:3000",       // Open button (or null)
+  "schedule": {                         // optional launchd timer job (or omit)
+    "label": "com.example.job",         // launchd label
+    "plistPath": "~/Library/LaunchAgents/com.example.job.plist",
+    "caption": "Background scans"       // shown beside the switch
+  }
 }
 ```
+
+`schedule` only points at the job — its on/off state lives in `launchd`, not
+here, so the switch can never disagree with what's actually scheduled. The agent
+must already be installed at `plistPath`; if it isn't, turning the switch on
+says so in that app's log and flips back.
 
 The defaults baked into the binary are in `Sources/Models.swift`.

@@ -40,13 +40,15 @@ and presents two scenes that share it: a single `Window` (the grid) and a
 - **`AppManager.swift`** — the core. `@MainActor ObservableObject` that owns the
   app list and per-app `statuses`, polls status every 2.5s, and runs
   start/stop/restart. **All process control lives here.**
-- **`Models.swift`** — `ManagedApp` (one project, `Codable`), `AppStatus`
-  (`stopped` / `starting` / `running`), and `AppConfig` (loads/seeds the JSON
-  config). Also holds `defaultApps`, the seed list.
+- **`Models.swift`** — `ManagedApp` (one project, `Codable`), `ScheduledJob`
+  (an optional launchd timer job on an app), `AppStatus` (`stopped` /
+  `starting` / `running`), and `AppConfig` (loads/seeds the JSON config). Also
+  holds `defaultApps`, the seed list.
 - **`Shell.swift`** — `Shell.runLogin(_:)` runs a command through a login `zsh`
-  (`zsh -lc`, so PATH includes node/python); `Shell.listeningPorts()` parses
-  `lsof` for the set of LISTENing TCP ports. `String.shellQuoted` safely
-  single-quotes interpolated values.
+  (`zsh -lc`, so PATH includes node/python), `runLoginResult(_:)` adds the exit
+  status; `Shell.listeningPorts()` parses `lsof` for the set of LISTENing TCP
+  ports and `Shell.scheduledLaunchdLabels()` the set of live launchd labels.
+  `String.shellQuoted` safely single-quotes interpolated values.
 - **`ContentView.swift`** — the grid window UI: header + `AppTile`s with
   Start / Stop / Restart / Open buttons.
 - **`MenuBarContent.swift`** — the menu-bar menu (same actions, plus Refresh /
@@ -61,6 +63,25 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   in `Models.swift`. To change which apps ship by default, edit `defaultApps`;
   to change a user's live apps, they edit that JSON. Per-app logs go to
   `~/Library/Application Support/LaunchDeck/logs/<App>.log`.
+- **Adding an app to `defaultApps` is not enough on its own** for anyone who has
+  already run the app — apps.json is only *seeded* once. `load()` therefore
+  merges: it appends defaults whose `name` is neither in apps.json nor in the
+  `seeded.json` ledger beside it, preserving the user's edits and ordering.
+  The ledger records every default ever offered, so an app the user deletes
+  stays deleted instead of returning on the next launch. **Editing an existing
+  `defaultApps` entry still won't reach an existing install** (matching by name,
+  it's already "known") — that only affects fresh seeds. The one exception is
+  `AppConfig.backfillNewFields`: when you add a *new field* to a default (as
+  `schedule` was), extend that function to copy it onto saved entries where it's
+  nil, or the feature ships dead for everyone who already ran the app.
+- **Ports must be unique across apps**, since status is inferred from ports
+  alone. Where a project's own config collides (elevator-clicker pins vite to
+  5180, which is Study App's), override at launch via `startCommand` rather than
+  editing the sibling repo.
+- Multi-step start commands are wrapped in `zsh -c '…'`. `launchCommand` builds
+  `cd … && nohup <startCommand> >> <log> 2>&1 &`, so a bare `a; b` would leave
+  only `b` backgrounded and redirected, and `npm install` output would escape
+  the log.
 - **Start** runs the app's `startCommand` from its `directory`, detached via
   `cd … && nohup <cmd> >> <log> 2>&1 &`. The login shell exits immediately so the
   servers reparent to `launchd` — quitting Launch Deck never kills running apps.
@@ -76,6 +97,32 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   SIGTERM alone leaves `uvicorn --reload` / vite processes lingering, which is
   why the escalation matters. A `ManagedApp.stopCommand`, if set, overrides this.
   **Restart** = `killCommand; sleep 2; launchCommand` in one detached shell.
+- **Scheduled jobs are a separate axis from Start/Stop.** An app with a
+  `schedule` (`ScheduledJob`) owns a launchd timer job that has no port, so the
+  port poll can't see it — it gets a switch on the tile instead.
+  `setScheduled(_:enabled:)` needs *both* launchctl verbs in each direction:
+  off is `bootout` (stop it now) **plus** `disable` (persist it, or the agent
+  loads straight back at next login); on is `enable` (clear that override, or
+  bootstrap is refused) **plus** `bootstrap`. State is never written to
+  apps.json — `Shell.scheduledLaunchdLabels()` re-reads it from launchd every
+  poll, treating a label as on only when it's *loaded* (`launchctl list`) and
+  *not disabled* (`launchctl print-disabled`, which says `=> disabled` /
+  `=> enabled`). Either half alone misreads a job. `scheduleBusy` holds the
+  switch while a call is in flight so the poll can't snap it back mid-toggle.
+
+### Grid sizing (the deck should never need scrolling)
+
+The tile grid is tuned so the whole deck is visible at once. Three numbers are
+coupled — change one and re-check the others: the adaptive column `minimum`
+(210) in `ContentView`, the window `minWidth` (690, the narrowest width that
+still fits 3 columns), and `.defaultSize` (900×560) in `LaunchDeckApp`. At the
+default size the current 7 apps use ~370pt of ~496pt, so ~9 apps fit before
+scrolling returns; past that, widen `defaultSize` rather than shrinking tiles
+further. The `ScrollView` stays as the fallback for small windows.
+
+A tile with a `schedule` is ~26pt taller, and `LazyVGrid` sizes a whole row to
+its tallest tile — so adding a second scheduled app to a *different* row costs
+another ~26pt, not zero. Keep `scheduleRow` to one line.
 
 ## Versioning (bump on every change)
 
