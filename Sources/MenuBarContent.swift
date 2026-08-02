@@ -35,6 +35,17 @@ struct MenuBarContent: View {
                 }
             }
 
+            if let job = app.schedule {
+                let on = manager.scheduled[app.id] ?? false
+                Button {
+                    manager.setScheduled(app, enabled: !on)
+                } label: {
+                    Label("    \(job.caption): \(on ? "On" : "Off") — turn \(on ? "off" : "on")",
+                          systemImage: on ? "clock.arrow.2.circlepath" : "clock.badge.xmark")
+                }
+                .disabled(manager.scheduleBusy.contains(app.id))
+            }
+
             Button {
                 manager.openLog(app)
             } label: {

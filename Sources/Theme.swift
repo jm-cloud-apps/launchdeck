@@ -21,16 +21,20 @@ extension Color {
 struct DeckButton: ButtonStyle {
     var tint: Color
     var filled: Bool
+    /// Icon-only buttons hug their content instead of splitting the row evenly,
+    /// so the labelled action (Start / Stop) keeps the width it needs on a
+    /// narrow tile.
+    var compact: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.semibold))
+            .font(.caption.weight(.semibold))
             .foregroundStyle(filled ? Color.black : tint)
-            .padding(.vertical, 9)
-            .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .padding(.horizontal, compact ? 8 : 10)
+            .frame(maxWidth: compact ? nil : .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 9)
                     .fill(filled ? tint : tint.opacity(0.14))
             )
             .opacity(configuration.isPressed ? 0.65 : 1)
