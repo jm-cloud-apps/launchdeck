@@ -92,3 +92,57 @@ enum Shell {
         return ports
     }
 }
+
+
+/// The two things Launch Deck touches on a background agent: its status port
+/// and its config file. Blocking — call off the main thread.
+enum AgentFiles {
+    /// One `GET /status`, with a short timeout so a wedged agent costs the
+    /// 2.5s poll nothing it can feel. nil on any failure.
+    static func fetchStatus(_ panel: AgentPanel) -> AgentStatus? {
+        guard let url = URL(string: panel.statusURL) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        let done = DispatchSemaphore(value: 0)
+        var result: AgentStatus?
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            defer { done.signal() }
+            guard let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            result = AgentStatus(json: json)
+        }.resume()
+        _ = done.wait(timeout: .now() + 2)
+        return result
+    }
+
+    /// The agent's config, falling back to the first entry of each picker list
+    /// when the file is missing or unreadable (the agent seeds the same
+    /// defaults on its first cycle, so the tile and the agent agree).
+    static func readConfig(_ panel: AgentPanel) -> AgentConfig {
+        let fallback = AgentConfig(model: panel.models.first ?? "opus",
+                                   effort: panel.efforts.first ?? "high")
+        guard let data = FileManager.default.contents(atPath: panel.expandedConfigPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return fallback }
+        return AgentConfig(model: json["model"] as? String ?? fallback.model,
+                           effort: json["effort"] as? String ?? fallback.effort)
+    }
+
+    /// Merge model/effort into the existing file, preserving every other key.
+    static func writeConfig(_ panel: AgentPanel, _ cfg: AgentConfig) {
+        let path = panel.expandedConfigPath
+        var json: [String: Any] = [:]
+        if let data = FileManager.default.contents(atPath: path),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+        json["model"] = cfg.model
+        json["effort"] = cfg.effort
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+}

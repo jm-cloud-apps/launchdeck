@@ -46,6 +46,11 @@ struct MenuBarContent: View {
                 .disabled(manager.scheduleBusy.contains(app.id))
             }
 
+            if app.agent != nil {
+                // Read-only in the menu: the pickers live on the tile.
+                Text("    \(agentLine(for: app))")
+            }
+
             Button {
                 manager.openLog(app)
             } label: {
@@ -66,6 +71,17 @@ struct MenuBarContent: View {
 
         Button("Quit Launch Deck") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private func agentLine(for app: ManagedApp) -> String {
+        let cfg = manager.agentConfigs[app.id]
+        let picks = cfg.map { "\($0.model.capitalized) · \($0.effort)" } ?? ""
+        guard let s = manager.agentStatuses[app.id] else {
+            return picks.isEmpty ? "Agent not running" : "Agent not running — \(picks)"
+        }
+        let five = s.fiveHourPct.map { "AI \(Int($0.rounded()))%" } ?? "AI —"
+        let week = s.sevenDayPct.map { " · wk \(Int($0.rounded()))%" } ?? ""
+        return "\(five)\(week) · \(picks) · \(s.status.replacingOccurrences(of: "_", with: " "))"
     }
 
     private var appVersion: String {

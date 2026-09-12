@@ -41,10 +41,12 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   app list and per-app `statuses`, polls status every 2.5s, and runs
   start/stop/restart. **All process control lives here.**
 - **`Models.swift`** — `ManagedApp` (one project, `Codable`), `ScheduledJob`
-  (an optional launchd timer job on an app), `AppStatus` (`stopped` /
-  `starting` / `running`), and `AppConfig` (loads/seeds the JSON config). Also
-  holds `defaultApps`, the seed list.
-- **`Shell.swift`** — `Shell.runLogin(_:)` runs a command through a login `zsh`
+  (an optional launchd timer job on an app), `AgentPanel` / `AgentStatus` /
+  `AgentConfig` (an optional background AI agent on an app), `AppStatus`
+  (`stopped` / `starting` / `running`), and `AppConfig` (loads/seeds the JSON
+  config). Also holds `defaultApps`, the seed list.
+- **`Shell.swift`** — `AgentFiles` (an agent's `/status` fetch and its config
+  file read/merge-write) and `Shell.runLogin(_:)`, which runs a command through a login `zsh`
   (`zsh -lc`, so PATH includes node/python), `runLoginResult(_:)` adds the exit
   status; `Shell.listeningPorts()` parses `lsof` for the set of LISTENing TCP
   ports and `Shell.scheduledLaunchdLabels()` the set of live launchd labels.
@@ -110,6 +112,25 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   `=> enabled`). Either half alone misreads a job. `scheduleBusy` holds the
   switch while a call is in flight so the poll can't snap it back mid-toggle.
 
+- **Background agents are a third axis**, beside Start/Stop and schedules.
+  **Launch Deck holds none of an agent's logic** — what QuantForge's sweep
+  agent sweeps, in what order, and what counts as done is decided in
+  `quantforge/backend/tools/ep_sweep_agent.py`; this app only starts it, stops
+  it, writes two picker values, and renders `/status`. Never move a rule here.
+  An app with an `agent` (`AgentPanel`) is still a normal port-tracked tile —
+  the agent binds a loopback status port precisely so the existing
+  start/stop/kill machinery applies unchanged (Stop's process-group kill also
+  takes out the `claude` child). What the panel adds is *reading*: every poll
+  fetches `statusURL` (only while the port is up; 1.5s timeout so a wedged
+  agent can't stall the poll) into `agentStatuses`, and reads the config file
+  into `agentConfigs` whether or not the agent is up, because the pickers are
+  most useful on a stopped agent. `setAgentConfig` merge-writes only `model`
+  and `effort` into that file and leaves the agent's other keys alone; the
+  agent reads it per cycle, so nothing here restarts anything. The usage % is
+  whatever the agent's last request reported — there is no live query, and the
+  tile's tooltip stamps the time so it is never mistaken for one. New `agent`
+  field → `backfillNewFields` fills it, same as `schedule`.
+
 ### Grid sizing (the deck should never need scrolling)
 
 The tile grid is tuned so the whole deck is visible at once. Three numbers are
@@ -122,7 +143,9 @@ further. The `ScrollView` stays as the fallback for small windows.
 
 A tile with a `schedule` is ~26pt taller, and `LazyVGrid` sizes a whole row to
 its tallest tile — so adding a second scheduled app to a *different* row costs
-another ~26pt, not zero. Keep `scheduleRow` to one line.
+another ~26pt, not zero. Keep `scheduleRow` to one line. A tile with an
+`agent` is ~60pt taller (usage bar, pickers, detail line), which is why
+`defaultSize` is 640 high; keep `agentRows` to those three lines.
 
 ## Versioning (bump on every change)
 

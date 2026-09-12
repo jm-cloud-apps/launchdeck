@@ -5,7 +5,8 @@ projects. Each tile starts/stops a project and shows whether it's running.
 
 Ships configured for **QuantForge** (:5173), **Budgeteer** (:5174), **Study App**
 (:5180), **PlantForge** (:5190), **Elevator Clicker** (:5185), **Housing
-Calculator** (:4174), and **InventoryForge** (:4175).
+Calculator** (:4174), **InventoryForge** (:4175), **Trade Templates**
+(:4181), and QuantForge's **EP Sweep Agent** (:8765).
 
 ## Build & run
 
@@ -41,6 +42,18 @@ there onto the Dock.
   window, so turning it off when you don't want that is the point. The switch
   reads its state straight from `launchd` each poll — flip the job in a terminal
   and the switch follows.
+- **Background agents** — an app can own an AI agent: a loop of headless
+  `claude` runs that reports itself over a loopback port. Launch Deck is the
+  remote control only — the agent's logic lives in its own repo. The tile gets an
+  **AI usage** bar (the five-hour window as the agent's last request saw it,
+  with the weekly figure beside it), **Model** and **Effort** pickers, and a
+  line on what cycle it is in, how many candidates are queued, and how many
+  entries have landed. The pickers write the agent's config file, which
+  it re-reads at the start of each cycle, so a change never interrupts a batch.
+  The one that ships is QuantForge's *EP Sweep Agent*, which keeps grading
+  swept episodic pivots into the study library while the subscription has
+  limit left, and pauses itself at a cap (default 90%) until the window resets.
+  Start/Stop work like any tile — Stop reaches the running `claude` too.
 - **Logs** — the `doc.text` button on each tile (and "View … log" in the menu)
   opens that app's log so you can see what happened, including failures like
   `npm: command not found`. Launch Deck also writes its own timestamped
