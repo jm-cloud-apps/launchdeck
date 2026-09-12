@@ -13,6 +13,13 @@ final class AppManager: ObservableObject {
     /// Apps whose launchctl call is in flight. The switch is disabled while it
     /// is, so a double-tap can't race two bootstraps against each other.
     @Published private(set) var scheduleBusy: Set<String> = []
+    /// What each background agent last reported over its status port, for apps
+    /// that have one. Absent while the agent is down — the tile then shows the
+    /// pickers alone, since those read a file rather than the agent.
+    @Published private(set) var agentStatuses: [String: AgentStatus] = [:]
+    /// Each agent's model/effort, read back from its config file every poll so
+    /// the pickers track a hand edit as well as their own writes.
+    @Published private(set) var agentConfigs: [String: AgentConfig] = [:]
 
     /// Keeps a freshly-launched app showing "Starting" until its port comes up
     /// (or this deadline passes), so polling doesn't snap it back to "Stopped".
@@ -42,10 +49,45 @@ final class AppManager: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             let listening = Shell.listeningPorts()
             let labels = wantsSchedules ? Shell.scheduledLaunchdLabels() : []
+            // Agents: the status body only exists while the port is up, but the
+            // config file is there either way — read it so the pickers work on a
+            // stopped agent, which is when you'd set them.
+            var statuses: [String: AgentStatus] = [:]
+            var configs: [String: AgentConfig] = [:]
+            for app in apps {
+                guard let panel = app.agent else { continue }
+                configs[app.id] = AgentFiles.readConfig(panel)
+                if !Set(app.ports).intersection(listening).isEmpty,
+                   let status = AgentFiles.fetchStatus(panel) {
+                    statuses[app.id] = status
+                }
+            }
             DispatchQueue.main.async {
                 self.applyStatuses(apps: apps, listening: listening)
                 if wantsSchedules { self.applySchedules(apps: apps, labels: labels) }
+                self.agentStatuses = statuses
+                for (id, cfg) in configs where self.agentConfigs[id] != cfg {
+                    self.agentConfigs[id] = cfg
+                }
             }
+        }
+    }
+
+    // MARK: - Background agents
+
+    /// Set an agent's model or effort. Written to the agent's config file, which
+    /// it re-reads at the start of every cycle — so the change lands on the
+    /// next batch rather than tearing down the one in flight. Only the two keys
+    /// are touched; whatever else the file holds (caps, batch sizes) stays.
+    func setAgentConfig(_ app: ManagedApp, model: String? = nil, effort: String? = nil) {
+        guard let panel = app.agent else { return }
+        var cfg = agentConfigs[app.id] ?? AgentFiles.readConfig(panel)
+        if let m = model, panel.models.contains(m) { cfg.model = m }
+        if let e = effort, panel.efforts.contains(e) { cfg.effort = e }
+        agentConfigs[app.id] = cfg          // optimistic; the poll re-reads the file
+        appendLog(app, "AGENT CONFIG — model \(cfg.model), effort \(cfg.effort) (applies next cycle)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            AgentFiles.writeConfig(panel, cfg)
         }
     }
 

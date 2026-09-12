@@ -21,6 +21,67 @@ struct ScheduledJob: Codable, Equatable {
     }
 }
 
+/// A background AI agent that belongs to an app — a loop of headless `claude`
+/// runs that reports itself over a loopback HTTP port (QuantForge's EP sweep
+/// agent is the case this exists for).
+///
+/// Launch Deck is the remote control, not the brain: what gets swept, in what
+/// order, and what counts as done all live in the agent's own repo. The port
+/// is still what says whether it is running, same as any tile; this only says
+/// where to read the rest — the AI usage %, the cycle and queue, the
+/// model/effort in use — and where the pickers write. Model and effort are
+/// read by the agent at the start of each cycle, so changing them here never
+/// aborts a batch mid-grade.
+struct AgentPanel: Codable, Equatable {
+    var statusURL: String    // e.g. "http://127.0.0.1:8765/status"
+    var configPath: String   // the JSON the agent reads model/effort from
+    var models: [String]     // aliases `claude --model` accepts, in picker order
+    var efforts: [String]    // `claude --effort` levels, in picker order
+
+    var expandedConfigPath: String {
+        (configPath as NSString).expandingTildeInPath
+    }
+}
+
+/// What the agent's `/status` says about itself. Decoded loosely on purpose:
+/// the tile should degrade to "Running" with blanks, not refuse to render,
+/// when the agent adds a field.
+struct AgentStatus: Equatable {
+    var status: String           // running · cooldown · paused_limit · waiting_backend · stopped
+    var detail: String
+    var cycle: Int
+    var fiveHourPct: Double?     // AI usage, this five-hour window
+    var sevenDayPct: Double?     // AI usage, this week
+    var usageObservedAt: Date?
+    var capPct: Double?
+    var queued: Int              // candidates swept and waiting to be graded
+    var posted: Int              // entries the library confirms this agent added
+    var sessionsSwept: Int
+
+    init?(json: [String: Any]) {
+        guard let status = json["status"] as? String else { return nil }
+        self.status = status
+        detail = json["detail"] as? String ?? ""
+        cycle = json["cycle"] as? Int ?? 0
+        let usage = json["usage"] as? [String: Any]
+        fiveHourPct = (usage?["five_hour"] as? [String: Any])?["pct"] as? Double
+        sevenDayPct = (usage?["seven_day"] as? [String: Any])?["pct"] as? Double
+        if let t = usage?["observed_at"] as? Double { usageObservedAt = Date(timeIntervalSince1970: t) }
+        capPct = (json["config"] as? [String: Any])?["max_utilization_pct"] as? Double
+        let cov = json["coverage"] as? [String: Any]
+        queued = cov?["queued"] as? Int ?? 0
+        posted = cov?["posted"] as? Int ?? 0
+        sessionsSwept = cov?["sessions"] as? Int ?? 0
+    }
+}
+
+/// The two fields the tile's pickers own, read back from the agent's config
+/// file each poll so a hand edit shows up too.
+struct AgentConfig: Equatable {
+    var model: String
+    var effort: String
+}
+
 /// One launchable project. Decoded from apps.json so you can add apps
 /// without recompiling. `id` is the name, so names must be unique.
 struct ManagedApp: Identifiable, Codable, Equatable {
@@ -38,6 +99,7 @@ struct ManagedApp: Identifiable, Codable, Equatable {
     // Defaulted so the memberwise init and older apps.json files (which have no
     // such key) both keep working.
     var schedule: ScheduledJob? = nil   // optional launchd timer job, toggled on the tile
+    var agent: AgentPanel? = nil        // optional background AI agent, with usage + pickers on the tile
 
     var expandedDirectory: String {
         (directory as NSString).expandingTildeInPath
@@ -101,10 +163,15 @@ enum AppConfig {
         let defaults = Dictionary(defaultApps.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         var changed = false
         let filled = saved.map { app -> ManagedApp in
-            guard app.schedule == nil, let job = defaults[app.name]?.schedule else { return app }
             var copy = app
-            copy.schedule = job
-            changed = true
+            if app.schedule == nil, let job = defaults[app.name]?.schedule {
+                copy.schedule = job
+                changed = true
+            }
+            if app.agent == nil, let panel = defaults[app.name]?.agent {
+                copy.agent = panel
+                changed = true
+            }
             return copy
         }
         return (filled, changed)
@@ -252,6 +319,46 @@ let defaultApps: [ManagedApp] = [
             label: "com.inventoryforge.collector",
             plistPath: "~/Library/LaunchAgents/com.inventoryforge.collector.plist",
             caption: "Background scans"
+        )
+    ),
+    ManagedApp(
+        name: "Trade Templates",
+        subtitle: "Client site demos · :4181",
+        icon: "rectangle.3.group.fill",
+        color: "2dd4bf",
+        directory: "\(githubRoot)/templates",
+        // Static showcase — no build step, so just serve the repo root. Port 4181
+        // matches the `templates` entry in quantforge's .claude/launch.json on
+        // purpose: it's the same directory served the same way, so whichever
+        // starts first wins rather than the two racing on different ports.
+        startCommand: staticServer(port: 4181),
+        stopCommand: nil,
+        ports: [4181],
+        readyPort: 4181,
+        // Opens the gallery, which is what you'd actually put in front of a client.
+        url: "http://localhost:4181"
+    ),
+    ManagedApp(
+        name: "EP Sweep Agent",
+        subtitle: "QuantForge · claude sweeps · :8765",
+        icon: "sparkles",
+        color: "c084fc",
+        directory: "\(githubRoot)/quantforge/backend",
+        // A loop of headless `claude -p` runs, each one sweep-and-grade cycle
+        // against the QuantForge backend (which must be up on :8000 — the agent
+        // waits for it rather than failing). The status port is the tile's
+        // liveness signal, and the kill-by-port-group Stop reaches the running
+        // `claude` child too, since it shares the group.
+        startCommand: "zsh -c 'source venv/bin/activate && exec python tools/ep_sweep_agent.py --port 8765'",
+        stopCommand: nil,
+        ports: [8765],
+        readyPort: 8765,
+        url: "http://127.0.0.1:8765/status",
+        agent: AgentPanel(
+            statusURL: "http://127.0.0.1:8765/status",
+            configPath: "\(githubRoot)/quantforge/backend/data/ep_sweep_agent/config.json",
+            models: ["opus", "sonnet", "haiku"],
+            efforts: ["low", "medium", "high", "xhigh", "max"]
         )
     ),
 ]

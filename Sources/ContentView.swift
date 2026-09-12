@@ -33,12 +33,16 @@ struct ContentView: View {
                                 status: manager.statuses[app.id] ?? .stopped,
                                 scheduled: manager.scheduled[app.id] ?? false,
                                 scheduleBusy: manager.scheduleBusy.contains(app.id),
+                                agentStatus: manager.agentStatuses[app.id],
+                                agentConfig: manager.agentConfigs[app.id],
                                 onStart: { manager.start(app) },
                                 onStop: { manager.stop(app) },
                                 onRestart: { manager.restart(app) },
                                 onOpen: { manager.open(app) },
                                 onLogs: { manager.openLog(app) },
-                                onSchedule: { manager.setScheduled(app, enabled: $0) }
+                                onSchedule: { manager.setScheduled(app, enabled: $0) },
+                                onAgentModel: { manager.setAgentConfig(app, model: $0) },
+                                onAgentEffort: { manager.setAgentConfig(app, effort: $0) }
                             )
                         }
                     }
@@ -89,12 +93,16 @@ struct AppTile: View {
     let status: AppStatus
     let scheduled: Bool
     let scheduleBusy: Bool
+    let agentStatus: AgentStatus?
+    let agentConfig: AgentConfig?
     let onStart: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
     let onOpen: () -> Void
     let onLogs: () -> Void
     let onSchedule: (Bool) -> Void
+    let onAgentModel: (String) -> Void
+    let onAgentEffort: (String) -> Void
 
     private var accent: Color { Color(hex: app.color) }
 
@@ -166,6 +174,7 @@ struct AppTile: View {
             }
 
             if app.schedule != nil { scheduleRow }
+            if app.agent != nil { agentRows }
         }
         .padding(12)
         .background(
@@ -208,6 +217,133 @@ struct AppTile: View {
                   ? "Scheduled runs are on (launchd: \(job.label))"
                   : "Scheduled runs are off — nothing runs in the background")
         }
+    }
+
+    /// The background-agent block: AI usage, the two pickers, and what the
+    /// agent is doing. Three short rows (~60pt) — the one tile allowed to be
+    /// this tall, since it is the only one with anything to say.
+    ///
+    /// The usage figure is what the agent's LAST request reported, so it is
+    /// stamped with its time: the agent cannot ask for a fresher number while
+    /// paused without spending the limit it is pausing to protect.
+    @ViewBuilder
+    private var agentRows: some View {
+        if let panel = app.agent {
+            let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
+                                                 effort: panel.efforts.first ?? "")
+            VStack(alignment: .leading, spacing: 5) {
+                usageRow
+
+                HStack(spacing: 6) {
+                    agentPicker(label: "Model", value: cfg.model, options: panel.models,
+                                onChange: onAgentModel)
+                    agentPicker(label: "Effort", value: cfg.effort, options: panel.efforts,
+                                onChange: onAgentEffort)
+                }
+                .help("Applies at the start of the agent's next cycle")
+
+                Text(agentDetail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private var usageRow: some View {
+        let five = agentStatus?.fiveHourPct
+        let week = agentStatus?.sevenDayPct
+        let cap = agentStatus?.capPct ?? 90
+        let color: Color = {
+            guard let v = five else { return Color.white.opacity(0.35) }
+            if v >= cap { return Color(hex: "f87171") }
+            if v >= cap * 0.75 { return Color(hex: "f59e0b") }
+            return Color(hex: "34d399")
+        }()
+        return HStack(spacing: 6) {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(color)
+            Text("AI usage")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.55))
+            // The five-hour window, which is the one that actually stops the agent.
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(color)
+                        .frame(width: geo.size.width * CGFloat(min(max((five ?? 0) / 100, 0), 1)))
+                }
+            }
+            .frame(height: 5)
+            Text(five.map { "\(Int($0.rounded()))%" } ?? "—")
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(five == nil ? Color.white.opacity(0.35) : color)
+                .fixedSize()
+            Text(week.map { "wk \(Int($0.rounded()))%" } ?? "")
+                .font(.system(size: 9, weight: .medium).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.4))
+                .fixedSize()
+        }
+        .help(usageHelp)
+    }
+
+    private var usageHelp: String {
+        guard let s = agentStatus, let five = s.fiveHourPct else {
+            return "AI usage is reported by the agent's own requests — start it to see a figure"
+        }
+        var parts = ["5-hour window \(Int(five.rounded()))%"]
+        if let w = s.sevenDayPct { parts.append("7-day \(Int(w.rounded()))%") }
+        if let cap = s.capPct { parts.append("agent pauses at \(Int(cap))%") }
+        parts.append("\(s.sessionsSwept) sessions swept · \(s.queued) queued · \(s.posted) posted")
+        if let at = s.usageObservedAt {
+            let f = DateFormatter(); f.dateFormat = "HH:mm"
+            parts.append("as of \(f.string(from: at))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func agentPicker(label: String, value: String, options: [String],
+                             onChange: @escaping (String) -> Void) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.4))
+            Picker("", selection: Binding(get: { value }, set: onChange)) {
+                ForEach(options, id: \.self) { Text($0.capitalized).tag($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.mini)
+            .tint(accent)
+        }
+    }
+
+    /// One line on what the agent is doing, from its own `detail` when it is
+    /// up, else the plain state. Kept to a single truncated line — the tile
+    /// is already the tallest on the deck.
+    private var agentDetail: String {
+        guard let s = agentStatus else {
+            return status == .stopped ? "Sweeps run while limit remains · Start to begin" : "Waiting for the agent…"
+        }
+        let prefix: String
+        switch s.status {
+        case "paused_limit":    prefix = "Paused"
+        case "waiting_backend": prefix = "Waiting"
+        case "sweeping":        prefix = "Sweeping"
+        case "cooldown":        prefix = "Cooling down"
+        case "idle":            prefix = "Idle"
+        case "error":           prefix = "Error"
+        case "stopped":         prefix = "Stopped"
+        default:                prefix = "Cycle \(s.cycle)"
+        }
+        let body = s.detail.isEmpty ? "" : " · \(s.detail)"
+        // Queue and posted are the ledger's numbers: what is waiting, and what
+        // the library confirms landed. Together they say the loop is moving.
+        let tally = " · q\(s.queued) · \(s.posted) posted"
+        return prefix + body + tally
     }
 
     private var borderColor: Color {
