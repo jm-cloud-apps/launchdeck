@@ -137,6 +137,19 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   whatever the agent's last request reported — there is no live query, and the
   tile's tooltip stamps the time so it is never mistaken for one. New `agent`
   field → `backfillNewFields` fills it, same as `schedule`.
+- **A REMOTE agent (`AgentPanel.remote`) is monitor-only.** It runs on another
+  machine (a cloud VM); Launch Deck never reaches its port. A Mac-side poller
+  (`vm-agent-deployment/scripts/telemetry-pull.sh`, a 30s launchd job) fetches
+  the VM's `/status` over ssh and writes it to the panel's `expandedStatePath`
+  under `~/Library/Application Support/LaunchDeck/vm-telemetry/`. The tile reads
+  that file: `AgentFiles.readStateStatus` builds the `AgentStatus`, and the
+  app-status pill comes from the file's `updated_at` freshness (fresh + a live
+  status word ⇒ Running; ≥180s stale ⇒ Stopped, with the detail line saying
+  "Stale · last telemetry … ago"). Such a tile hides Start/Stop/Restart/Open
+  (control the VM agent over ssh/systemd) and shows model/effort **read-only**
+  (the VM owns its config). Ports are `[]`, so `applyStatuses` marks it stopped
+  and the remote-pill override (computed in `refresh`) sets the real state
+  afterwards. The "EP Sweep Agent (VM)" default app is the one instance.
 
 ### Grid sizing (the deck should never need scrolling)
 
@@ -152,7 +165,8 @@ A tile with a `schedule` is ~26pt taller, and `LazyVGrid` sizes a whole row to
 its tallest tile — so adding a second scheduled app to a *different* row costs
 another ~26pt, not zero. Keep `scheduleRow` to one line. A tile with an
 `agent` is ~40pt taller (pickers, detail line), which is why `defaultSize`
-is 620 high; keep `agentRows` to two lines. The plan-usage strip sits on the
+is 620 high; keep `agentRows` to two lines. There are now two agent tiles
+(local + VM), so `defaultSize` is 720 high. The plan-usage strip sits on the
 header line (no height cost) and is why the default width is 960.
 
 ## Versioning (bump on every change)

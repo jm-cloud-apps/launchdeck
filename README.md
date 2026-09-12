@@ -49,6 +49,11 @@ there onto the Dock.
   asked. The sweep agent refreshes it for free as it works; the ⟳ sends Claude
   a one-word Haiku message purely to be told (it costs a sliver of the limit,
   so it is a button, never a timer).
+- **Remote agent monitor** — an agent can run on another machine (a cloud VM)
+  and still show up here as a monitor-only tile (*EP Sweep Agent (VM)*): live
+  status, cycle, queue and usage, fed by a small Mac-side poller that fetches the
+  VM's status over SSH (see the `vm-agent-deployment` repo). No local Start/Stop;
+  model/effort show read-only.
 - **Background agents** — an app can own an AI agent: a loop of headless
   `claude` runs that reports itself over a loopback port. Launch Deck is the
   remote control only — the agent's logic lives in its own repo. The tile gets

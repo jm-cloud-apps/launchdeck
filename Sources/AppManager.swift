@@ -61,18 +61,32 @@ final class AppManager: ObservableObject {
             var statuses: [String: AgentStatus] = [:]
             var configs: [String: AgentConfig] = [:]
             var readings: [AIUsage] = [PlanUsage.readProbe()].compactMap { $0 }
+            // For a remote agent there is no local port; its pill comes from how
+            // fresh the synced state file is. Computed here, applied after
+            // applyStatuses (which would otherwise mark a portless app stopped).
+            var remotePill: [String: AppStatus] = [:]
             for app in apps {
                 guard let panel = app.agent else { continue }
                 configs[app.id] = AgentFiles.readConfig(panel)
                 if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
-                if !Set(app.ports).intersection(listening).isEmpty,
-                   let status = AgentFiles.fetchStatus(panel) {
+                if panel.remote {
+                    let st = AgentFiles.readStateStatus(panel)
+                    if let st { statuses[app.id] = st }
+                    // Fresh telemetry + a live status word ⇒ Running; stale or
+                    // absent ⇒ Stopped (the poller has gone quiet / VM is off).
+                    let fresh = st?.updatedAt.map { Date().timeIntervalSince($0) < 180 } ?? false
+                    let live = ["running", "sweeping", "cooldown", "paused_limit",
+                                "waiting_backend", "idle", "starting"].contains(st?.status ?? "")
+                    remotePill[app.id] = (fresh && live) ? .running : .stopped
+                } else if !Set(app.ports).intersection(listening).isEmpty,
+                          let status = AgentFiles.fetchStatus(panel) {
                     statuses[app.id] = status
                 }
             }
             DispatchQueue.main.async {
                 self.applyStatuses(apps: apps, listening: listening)
                 if wantsSchedules { self.applySchedules(apps: apps, labels: labels) }
+                for (id, pill) in remotePill { self.statuses[id] = pill }
                 self.agentStatuses = statuses
                 for (id, cfg) in configs where self.agentConfigs[id] != cfg {
                     self.agentConfigs[id] = cfg

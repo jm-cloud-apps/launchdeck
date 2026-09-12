@@ -140,6 +140,10 @@ struct AppTile: View {
                 statusPill
             }
 
+            // A remote agent has no local process, so its Start/Stop/Restart/Open
+            // buttons would act on nothing here — control it over ssh on the VM.
+            // The tile is monitor-only; the agent rows below carry the telemetry.
+            if app.agent?.remote != true {
             // Only the primary action is labelled; the rest are icon-only so a
             // narrow tile still fits the whole row without truncating.
             HStack(spacing: 7) {
@@ -177,6 +181,7 @@ struct AppTile: View {
                 .buttonStyle(DeckButton(tint: Color(hex: "94a3b8"), filled: false, compact: true))
                 .help("View log")
             }
+            }   // end: non-remote control row
 
             if app.schedule != nil { scheduleRow }
             if app.agent != nil { agentRows }
@@ -230,16 +235,28 @@ struct AppTile: View {
     @ViewBuilder
     private var agentRows: some View {
         if let panel = app.agent {
-            let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
-                                                 effort: panel.efforts.first ?? "")
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    agentPicker(label: "Model", value: cfg.model, options: panel.models,
-                                onChange: onAgentModel)
-                    agentPicker(label: "Effort", value: cfg.effort, options: panel.efforts,
-                                onChange: onAgentEffort)
+                if panel.remote {
+                    // Monitor-only: the VM owns the config, so show what it is
+                    // running read-only (change it over ssh on the VM). Values
+                    // come from the synced telemetry, not a local config file.
+                    HStack(spacing: 6) {
+                        readOnlyPick(label: "Model", value: agentStatus?.model?.capitalized ?? "—")
+                        readOnlyPick(label: "Effort", value: agentStatus?.effort ?? "—")
+                    }
+                    .help(panel.host.map { "Runs on \($0) — set model/effort over ssh" }
+                          ?? "Runs on the VM — set model/effort over ssh")
+                } else {
+                    let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
+                                                         effort: panel.efforts.first ?? "")
+                    HStack(spacing: 6) {
+                        agentPicker(label: "Model", value: cfg.model, options: panel.models,
+                                    onChange: onAgentModel)
+                        agentPicker(label: "Effort", value: cfg.effort, options: panel.efforts,
+                                    onChange: onAgentEffort)
+                    }
+                    .help("Applies at the start of the agent's next cycle")
                 }
-                .help("Applies at the start of the agent's next cycle")
 
                 Text(agentDetail)
                     .font(.system(size: 10, weight: .medium))
@@ -248,6 +265,19 @@ struct AppTile: View {
                     .truncationMode(.tail)
             }
             .padding(.top, 2)
+        }
+    }
+
+    /// Read-only twin of `agentPicker` for a remote agent — same footprint,
+    /// no menu (the VM owns the setting).
+    private func readOnlyPick(label: String, value: String) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.white.opacity(0.4))
+            Text(value)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.75))
         }
     }
 
@@ -271,8 +301,18 @@ struct AppTile: View {
     /// up, else the plain state. Kept to a single truncated line — the tile
     /// is already the tallest on the deck.
     private var agentDetail: String {
+        let remote = app.agent?.remote == true
         guard let s = agentStatus else {
+            if remote {
+                return "No telemetry yet — is the VM poller running? (\(app.agent?.host ?? "VM"))"
+            }
             return status == .stopped ? "Sweeps run while limit remains · Start to begin" : "Waiting for the agent…"
+        }
+        // For a remote agent the freshness of the synced file is the story: a
+        // stale file means the poller or the VM has gone quiet, which the pill
+        // alone (Stopped) doesn't distinguish from a deliberately idle agent.
+        if remote, let age = s.updatedAt.map({ Date().timeIntervalSince($0) }), age >= 180 {
+            return "Stale · last telemetry \(Self.ago(age)) ago — VM off or poller stopped"
         }
         let prefix: String
         switch s.status {
@@ -289,7 +329,20 @@ struct AppTile: View {
         // Queue and posted are the ledger's numbers: what is waiting, and what
         // the library confirms landed. Together they say the loop is moving.
         let tally = " · q\(s.queued) · \(s.posted) posted"
-        return prefix + body + tally
+        // A remote tile stamps the telemetry age so a fresh-looking cycle line
+        // is never mistaken for a live local one.
+        let via = (remote && s.updatedAt != nil)
+            ? " · via VM \(Self.ago(Date().timeIntervalSince(s.updatedAt!))) ago" : ""
+        return prefix + body + tally + via
+    }
+
+    /// Compact age like the usage strip uses ("20s", "3m", "1h").
+    static func ago(_ seconds: TimeInterval) -> String {
+        let s = Int(max(0, seconds))
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
     }
 
     private var borderColor: Color {

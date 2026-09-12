@@ -34,10 +34,19 @@ struct ScheduledJob: Codable, Equatable {
 /// read by the agent at the start of each cycle, so changing them here never
 /// aborts a batch mid-grade.
 struct AgentPanel: Codable, Equatable {
-    var statusURL: String    // e.g. "http://127.0.0.1:8765/status"
+    var statusURL: String    // e.g. "http://127.0.0.1:8765/status" (ignored when `remote`)
     var configPath: String   // the JSON the agent reads model/effort from
     var models: [String]     // aliases `claude --model` accepts, in picker order
     var efforts: [String]    // `claude --effort` levels, in picker order
+    // A REMOTE agent runs on another machine (a cloud VM). Launch Deck never
+    // reaches its port; instead a Mac-side poller (vm-agent-deployment's
+    // telemetry-pull) writes the VM's `/status` body to `expandedStatePath`
+    // every ~30s, and the tile reads that file. So a remote tile is
+    // monitor-only: no local Start/Stop (control is via ssh/systemd on the VM),
+    // and the pickers show the VM's model/effort read-only. Defaulted so older
+    // apps.json files decode unchanged.
+    var remote: Bool = false
+    var host: String? = nil  // display only, e.g. "root@10.0.0.42" — where the VM lives
 
     var expandedConfigPath: String {
         (configPath as NSString).expandingTildeInPath
@@ -95,6 +104,10 @@ struct AgentStatus: Equatable {
     var queued: Int              // candidates swept and waiting to be graded
     var posted: Int              // entries the library confirms this agent added
     var sessionsSwept: Int
+    var model: String?           // what the agent is running (for the read-only remote tile)
+    var effort: String?
+    var capPct: Double?          // config.max_utilization_pct, when the payload carries config
+    var updatedAt: Date?         // state's own timestamp — drives the "via VM · Xs ago" freshness
 
     init?(json: [String: Any]) {
         guard let status = json["status"] as? String else { return nil }
@@ -105,6 +118,10 @@ struct AgentStatus: Equatable {
         queued = cov?["queued"] as? Int ?? 0
         posted = cov?["posted"] as? Int ?? 0
         sessionsSwept = cov?["sessions"] as? Int ?? 0
+        model = json["model"] as? String
+        effort = json["effort"] as? String
+        capPct = (json["config"] as? [String: Any])?["max_utilization_pct"] as? Double
+        if let t = json["updated_at"] as? Double { updatedAt = Date(timeIntervalSince1970: t) }
     }
 }
 
@@ -392,6 +409,32 @@ let defaultApps: [ManagedApp] = [
             configPath: "\(githubRoot)/quantforge/backend/data/ep_sweep_agent/config.json",
             models: ["opus", "sonnet", "haiku"],
             efforts: ["low", "medium", "high", "xhigh", "max"]
+        )
+    ),
+    ManagedApp(
+        name: "EP Sweep Agent (VM)",
+        subtitle: "Runs on the cloud VM · monitor",
+        icon: "cloud.fill",
+        color: "38bdf8",
+        // Monitor-only: the agent runs on the VM, not here. A Mac-side poller
+        // (vm-agent-deployment/scripts/telemetry-pull.sh, on a 30s launchd
+        // timer) writes the VM's /status body to the state file this panel
+        // reads. There is no local process, so no directory/command is used and
+        // Start/Stop are hidden — control the VM agent over ssh/systemd.
+        directory: "~",
+        startCommand: ":",     // never launched (remote tile hides Start)
+        stopCommand: nil,
+        ports: [],             // no local port — status comes from the synced file
+        readyPort: nil,
+        url: nil,
+        agent: AgentPanel(
+            statusURL: "",
+            // expandedStatePath → …/vm-telemetry/state.json, where the poller writes.
+            configPath: "~/Library/Application Support/LaunchDeck/vm-telemetry/config.json",
+            models: ["opus", "sonnet", "haiku"],
+            efforts: ["low", "medium", "high", "xhigh", "max"],
+            remote: true,
+            host: "your VM"    // edit in apps.json to your VM host, e.g. root@10.0.0.42
         )
     ),
 ]

@@ -178,6 +178,17 @@ enum AgentFiles {
         return result
     }
 
+    /// The agent's full status read from its state file (the `/status` body a
+    /// poller has written for a remote agent, or the local agent's own
+    /// state.json). No network — this is how a remote/off tile still reports
+    /// what the VM agent is doing. nil if the file is missing or unreadable.
+    static func readStateStatus(_ panel: AgentPanel) -> AgentStatus? {
+        guard let data = FileManager.default.contents(atPath: panel.expandedStatePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return AgentStatus(json: json)
+    }
+
     /// The agent's config, falling back to the first entry of each picker list
     /// when the file is missing or unreadable (the agent seeds the same
     /// defaults on its first cycle, so the tile and the agent agree).
