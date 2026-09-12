@@ -156,7 +156,7 @@ and presents two scenes that share it: a single `Window` (the grid) and a
 The tile grid is tuned so the whole deck is visible at once. Three numbers are
 coupled — change one and re-check the others: the adaptive column `minimum`
 (210) in `ContentView`, the window `minWidth` (690, the narrowest width that
-still fits 3 columns), and `.defaultSize` (960×620) in `LaunchDeckApp`. At the
+still fits 3 columns), and `.defaultSize` (960×720) in `LaunchDeckApp`. At the
 default size the current 7 apps use ~370pt of ~496pt, so ~9 apps fit before
 scrolling returns; past that, widen `defaultSize` rather than shrinking tiles
 further. The `ScrollView` stays as the fallback for small windows.
