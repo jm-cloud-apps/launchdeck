@@ -42,13 +42,18 @@ there onto the Dock.
   window, so turning it off when you don't want that is the point. The switch
   reads its state straight from `launchd` each poll — flip the job in a terminal
   and the switch follows.
+- **Plan usage** — a strip on the header line shows your Claude plan's
+  **5-hour** and **weekly** limits with their reset times (hover for the
+  full breakdown), the numbers Claude's own `/usage` reports. There is no live query for this: a reading is what
+  some `claude` request was told, so the panel says how old it is and who
+  asked. The sweep agent refreshes it for free as it works; the ⟳ sends Claude
+  a one-word Haiku message purely to be told (it costs a sliver of the limit,
+  so it is a button, never a timer).
 - **Background agents** — an app can own an AI agent: a loop of headless
   `claude` runs that reports itself over a loopback port. Launch Deck is the
-  remote control only — the agent's logic lives in its own repo. The tile gets an
-  **AI usage** bar (the five-hour window as the agent's last request saw it,
-  with the weekly figure beside it), **Model** and **Effort** pickers, and a
-  line on what cycle it is in, how many candidates are queued, and how many
-  entries have landed. The pickers write the agent's config file, which
+  remote control only — the agent's logic lives in its own repo. The tile gets
+  **Model** and **Effort** pickers and a line on what cycle it is in, how many
+  candidates are queued, and how many entries have landed. The pickers write the agent's config file, which
   it re-reads at the start of each cycle, so a change never interrupts a batch.
   The one that ships is QuantForge's *EP Sweep Agent*, which keeps grading
   swept episodic pivots into the study library while the subscription has

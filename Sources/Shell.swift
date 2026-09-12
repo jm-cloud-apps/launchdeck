@@ -94,6 +94,68 @@ enum Shell {
 }
 
 
+/// Claude plan usage: where the numbers come from and how to ask for fresh ones.
+/// Blocking — call off the main thread.
+enum PlanUsage {
+    static var probeURL: URL { AppConfig.supportDir.appendingPathComponent("usage.json") }
+
+    /// The `usage` block out of an agent's state.json, if it has one.
+    static func readAgentState(_ panel: AgentPanel, source: String) -> AIUsage? {
+        guard let data = FileManager.default.contents(atPath: panel.expandedStatePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let usage = json["usage"] as? [String: Any]
+        else { return nil }
+        return AIUsage(json: usage, source: source)
+    }
+
+    /// The last probe result, if any.
+    static func readProbe() -> AIUsage? {
+        guard let data = try? Data(contentsOf: probeURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return AIUsage(json: json, source: "probe")
+    }
+
+    /// Ask Claude for a fresh reading the only way there is: send a message.
+    ///
+    /// A one-word Haiku turn with no tools is the cheapest request that still
+    /// carries a `rate_limit_event` — the same numbers `/usage` shows in a
+    /// session. It spends a sliver of the limit it is measuring, which is why
+    /// this is a button and never a timer. Through an interactive login shell
+    /// because `claude` lives under nvm's bin, same as `npm` does.
+    /// Returns nil (and writes nothing) if the event never arrives.
+    static func probe() -> AIUsage? {
+        let out = Shell.runLogin(
+            "claude -p 'Reply with the single word OK' --model haiku --effort low " +
+            "--output-format stream-json --verbose --tools '' --no-session-persistence 2>/dev/null",
+            interactive: true)
+        for line in out.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  event["type"] as? String == "rate_limit_event",
+                  let info = event["rate_limit_info"] as? [String: Any]
+            else { continue }
+            let windows = info["unifiedWindows"] as? [String: Any] ?? [:]
+            var json: [String: Any] = ["observed_at": Date().timeIntervalSince1970,
+                                       "status": info["status"] ?? "unknown"]
+            for key in ["five_hour", "seven_day"] {
+                guard let w = windows[key] as? [String: Any],
+                      let util = w["utilization"] as? Double else { continue }
+                // Utilization arrives as a fraction; stored as a percent, the
+                // agent's convention, so one decoder serves both files.
+                json[key] = ["pct": (util <= 1 ? util * 100 : util).rounded(),
+                             "resets_at": w["resetsAt"] ?? info["resetsAt"] ?? NSNull()]
+            }
+            guard let usage = AIUsage(json: json, source: "probe") else { continue }
+            if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? data.write(to: probeURL)
+            }
+            return usage
+        }
+        return nil
+    }
+}
+
 /// The two things Launch Deck touches on a background agent: its status port
 /// and its config file. Blocking — call off the main thread.
 enum AgentFiles {

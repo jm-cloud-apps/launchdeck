@@ -45,7 +45,9 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   `AgentConfig` (an optional background AI agent on an app), `AppStatus`
   (`stopped` / `starting` / `running`), and `AppConfig` (loads/seeds the JSON
   config). Also holds `defaultApps`, the seed list.
-- **`Shell.swift`** — `AgentFiles` (an agent's `/status` fetch and its config
+- **`Shell.swift`** — `PlanUsage` (reads Claude plan usage out of an agent's
+  state file or the last probe, and `probe()` runs the one-word Haiku message
+  that refreshes it), `AgentFiles` (an agent's `/status` fetch and its config
   file read/merge-write) and `Shell.runLogin(_:)`, which runs a command through a login `zsh`
   (`zsh -lc`, so PATH includes node/python), `runLoginResult(_:)` adds the exit
   status; `Shell.listeningPorts()` parses `lsof` for the set of LISTENing TCP
@@ -124,7 +126,12 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   fetches `statusURL` (only while the port is up; 1.5s timeout so a wedged
   agent can't stall the poll) into `agentStatuses`, and reads the config file
   into `agentConfigs` whether or not the agent is up, because the pickers are
-  most useful on a stopped agent. `setAgentConfig` merge-writes only `model`
+  most useful on a stopped agent. **Plan usage is deck-wide, not per tile**
+  (`PlanUsageInline` on the header line): it is a fact about the Claude account.
+  `aiUsage` is the newest of every agent's `state.json` `usage` block and the
+  last probe (`usage.json` in the support dir) — read as files, so it survives
+  the agent being stopped. `probeUsage()` is the only way to refresh without an
+  agent running and it spends limit, so it is never scheduled. `setAgentConfig` merge-writes only `model`
   and `effort` into that file and leaves the agent's other keys alone; the
   agent reads it per cycle, so nothing here restarts anything. The usage % is
   whatever the agent's last request reported — there is no live query, and the
@@ -136,7 +143,7 @@ and presents two scenes that share it: a single `Window` (the grid) and a
 The tile grid is tuned so the whole deck is visible at once. Three numbers are
 coupled — change one and re-check the others: the adaptive column `minimum`
 (210) in `ContentView`, the window `minWidth` (690, the narrowest width that
-still fits 3 columns), and `.defaultSize` (900×560) in `LaunchDeckApp`. At the
+still fits 3 columns), and `.defaultSize` (960×620) in `LaunchDeckApp`. At the
 default size the current 7 apps use ~370pt of ~496pt, so ~9 apps fit before
 scrolling returns; past that, widen `defaultSize` rather than shrinking tiles
 further. The `ScrollView` stays as the fallback for small windows.
@@ -144,8 +151,9 @@ further. The `ScrollView` stays as the fallback for small windows.
 A tile with a `schedule` is ~26pt taller, and `LazyVGrid` sizes a whole row to
 its tallest tile — so adding a second scheduled app to a *different* row costs
 another ~26pt, not zero. Keep `scheduleRow` to one line. A tile with an
-`agent` is ~60pt taller (usage bar, pickers, detail line), which is why
-`defaultSize` is 640 high; keep `agentRows` to those three lines.
+`agent` is ~40pt taller (pickers, detail line), which is why `defaultSize`
+is 620 high; keep `agentRows` to two lines. The plan-usage strip sits on the
+header line (no height cost) and is why the default width is 960.
 
 ## Versioning (bump on every change)
 

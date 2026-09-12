@@ -20,6 +20,12 @@ final class AppManager: ObservableObject {
     /// Each agent's model/effort, read back from its config file every poll so
     /// the pickers track a hand edit as well as their own writes.
     @Published private(set) var agentConfigs: [String: AgentConfig] = [:]
+    /// Claude plan usage for the deck-wide panel: the newest reading across every
+    /// agent's state file and the last manual probe. nil until something has
+    /// asked Claude at least once.
+    @Published private(set) var aiUsage: AIUsage?
+    @Published private(set) var usageProbing = false
+    @Published private(set) var usageProbeError: String?
 
     /// Keeps a freshly-launched app showing "Starting" until its port comes up
     /// (or this deadline passes), so polling doesn't snap it back to "Stopped".
@@ -54,9 +60,11 @@ final class AppManager: ObservableObject {
             // stopped agent, which is when you'd set them.
             var statuses: [String: AgentStatus] = [:]
             var configs: [String: AgentConfig] = [:]
+            var readings: [AIUsage] = [PlanUsage.readProbe()].compactMap { $0 }
             for app in apps {
                 guard let panel = app.agent else { continue }
                 configs[app.id] = AgentFiles.readConfig(panel)
+                if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
                 if !Set(app.ports).intersection(listening).isEmpty,
                    let status = AgentFiles.fetchStatus(panel) {
                     statuses[app.id] = status
@@ -68,6 +76,30 @@ final class AppManager: ObservableObject {
                 self.agentStatuses = statuses
                 for (id, cfg) in configs where self.agentConfigs[id] != cfg {
                     self.agentConfigs[id] = cfg
+                }
+                // Newest wins, whoever asked. A probe from a minute ago beats
+                // the agent's reading from an hour ago and vice versa.
+                let newest = readings.max { $0.observedAt < $1.observedAt }
+                if newest != self.aiUsage { self.aiUsage = newest }
+            }
+        }
+    }
+
+    // MARK: - Plan usage
+
+    /// Refresh the usage panel by sending Claude a message. Manual only.
+    func probeUsage() {
+        guard !usageProbing else { return }
+        usageProbing = true
+        usageProbeError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = PlanUsage.probe()
+            DispatchQueue.main.async {
+                self.usageProbing = false
+                if let u = result {
+                    self.aiUsage = u
+                } else {
+                    self.usageProbeError = "No reading — is `claude` installed and signed in?"
                 }
             }
         }
