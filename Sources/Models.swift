@@ -28,8 +28,9 @@ struct ScheduledJob: Codable, Equatable {
 /// Launch Deck is the remote control, not the brain: what gets swept, in what
 /// order, and what counts as done all live in the agent's own repo. The port
 /// is still what says whether it is running, same as any tile; this only says
-/// where to read the rest — the AI usage %, the cycle and queue, the
-/// model/effort in use — and where the pickers write. Model and effort are
+/// where to read the rest — the cycle and queue, the model/effort in use —
+/// and where the pickers write. (Plan usage is read from the agent's state
+/// file into the deck-wide panel, not shown per tile.) Model and effort are
 /// read by the agent at the start of each cycle, so changing them here never
 /// aborts a batch mid-grade.
 struct AgentPanel: Codable, Equatable {
@@ -41,6 +42,47 @@ struct AgentPanel: Codable, Equatable {
     var expandedConfigPath: String {
         (configPath as NSString).expandingTildeInPath
     }
+
+    /// The agent's persisted state, beside its config. Read for the plan-usage
+    /// panel even when the agent is down — it is the last `rate_limit_event`
+    /// the agent saw, which is the freshest figure available without spending.
+    var expandedStatePath: String {
+        ((expandedConfigPath as NSString).deletingLastPathComponent as NSString)
+            .appendingPathComponent("state.json")
+    }
+}
+
+/// One plan-usage window, as Claude reports it: percent used and when it resets.
+struct UsageWindow: Equatable {
+    var pct: Double
+    var resetsAt: Date?
+}
+
+/// Claude plan usage — the five-hour and weekly limits — plus where and when
+/// the reading came from. There is no live query for this: a figure is what
+/// some `claude` request was told, so it always carries its timestamp.
+struct AIUsage: Equatable {
+    var fiveHour: UsageWindow?
+    var sevenDay: UsageWindow?
+    var observedAt: Date
+    var source: String     // "EP Sweep Agent" or "probe"
+
+    /// Decodes the shape the sweep agent writes (`usage` in its state.json):
+    /// `{"five_hour": {"pct": 63, "resets_at": 1789173600}, "seven_day": {…},
+    ///   "observed_at": 1789170000}`. The probe writes the same shape.
+    init?(json: [String: Any], source: String) {
+        guard let at = json["observed_at"] as? Double else { return nil }
+        func window(_ key: String) -> UsageWindow? {
+            guard let w = json[key] as? [String: Any], let pct = w["pct"] as? Double else { return nil }
+            let resets = (w["resets_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+            return UsageWindow(pct: pct, resetsAt: resets)
+        }
+        fiveHour = window("five_hour")
+        sevenDay = window("seven_day")
+        guard fiveHour != nil || sevenDay != nil else { return nil }
+        observedAt = Date(timeIntervalSince1970: at)
+        self.source = source
+    }
 }
 
 /// What the agent's `/status` says about itself. Decoded loosely on purpose:
@@ -50,10 +92,6 @@ struct AgentStatus: Equatable {
     var status: String           // running · cooldown · paused_limit · waiting_backend · stopped
     var detail: String
     var cycle: Int
-    var fiveHourPct: Double?     // AI usage, this five-hour window
-    var sevenDayPct: Double?     // AI usage, this week
-    var usageObservedAt: Date?
-    var capPct: Double?
     var queued: Int              // candidates swept and waiting to be graded
     var posted: Int              // entries the library confirms this agent added
     var sessionsSwept: Int
@@ -63,11 +101,6 @@ struct AgentStatus: Equatable {
         self.status = status
         detail = json["detail"] as? String ?? ""
         cycle = json["cycle"] as? Int ?? 0
-        let usage = json["usage"] as? [String: Any]
-        fiveHourPct = (usage?["five_hour"] as? [String: Any])?["pct"] as? Double
-        sevenDayPct = (usage?["seven_day"] as? [String: Any])?["pct"] as? Double
-        if let t = usage?["observed_at"] as? Double { usageObservedAt = Date(timeIntervalSince1970: t) }
-        capPct = (json["config"] as? [String: Any])?["max_utilization_pct"] as? Double
         let cov = json["coverage"] as? [String: Any]
         queued = cov?["queued"] as? Int ?? 0
         posted = cov?["posted"] as? Int ?? 0

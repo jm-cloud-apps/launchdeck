@@ -75,6 +75,11 @@ struct ContentView: View {
                     .foregroundStyle(.white.opacity(0.5))
             }
             Spacer()
+            PlanUsageInline(usage: manager.aiUsage,
+                            probing: manager.usageProbing,
+                            error: manager.usageProbeError,
+                            onProbe: { manager.probeUsage() })
+            Spacer().frame(width: 6)
             Button { manager.refresh() } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.body.weight(.semibold))
@@ -219,21 +224,15 @@ struct AppTile: View {
         }
     }
 
-    /// The background-agent block: AI usage, the two pickers, and what the
-    /// agent is doing. Three short rows (~60pt) — the one tile allowed to be
-    /// this tall, since it is the only one with anything to say.
-    ///
-    /// The usage figure is what the agent's LAST request reported, so it is
-    /// stamped with its time: the agent cannot ask for a fresher number while
-    /// paused without spending the limit it is pausing to protect.
+    /// The background-agent block: the two pickers and what the agent is
+    /// doing. Two short rows (~40pt). Plan usage is deck-wide, not per tile —
+    /// it is a fact about the Claude account, and lives under the header.
     @ViewBuilder
     private var agentRows: some View {
         if let panel = app.agent {
             let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
                                                  effort: panel.efforts.first ?? "")
             VStack(alignment: .leading, spacing: 5) {
-                usageRow
-
                 HStack(spacing: 6) {
                     agentPicker(label: "Model", value: cfg.model, options: panel.models,
                                 onChange: onAgentModel)
@@ -250,59 +249,6 @@ struct AppTile: View {
             }
             .padding(.top, 2)
         }
-    }
-
-    private var usageRow: some View {
-        let five = agentStatus?.fiveHourPct
-        let week = agentStatus?.sevenDayPct
-        let cap = agentStatus?.capPct ?? 90
-        let color: Color = {
-            guard let v = five else { return Color.white.opacity(0.35) }
-            if v >= cap { return Color(hex: "f87171") }
-            if v >= cap * 0.75 { return Color(hex: "f59e0b") }
-            return Color(hex: "34d399")
-        }()
-        return HStack(spacing: 6) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(color)
-            Text("AI usage")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.55))
-            // The five-hour window, which is the one that actually stops the agent.
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.08))
-                    Capsule().fill(color)
-                        .frame(width: geo.size.width * CGFloat(min(max((five ?? 0) / 100, 0), 1)))
-                }
-            }
-            .frame(height: 5)
-            Text(five.map { "\(Int($0.rounded()))%" } ?? "—")
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(five == nil ? Color.white.opacity(0.35) : color)
-                .fixedSize()
-            Text(week.map { "wk \(Int($0.rounded()))%" } ?? "")
-                .font(.system(size: 9, weight: .medium).monospacedDigit())
-                .foregroundStyle(.white.opacity(0.4))
-                .fixedSize()
-        }
-        .help(usageHelp)
-    }
-
-    private var usageHelp: String {
-        guard let s = agentStatus, let five = s.fiveHourPct else {
-            return "AI usage is reported by the agent's own requests — start it to see a figure"
-        }
-        var parts = ["5-hour window \(Int(five.rounded()))%"]
-        if let w = s.sevenDayPct { parts.append("7-day \(Int(w.rounded()))%") }
-        if let cap = s.capPct { parts.append("agent pauses at \(Int(cap))%") }
-        parts.append("\(s.sessionsSwept) sessions swept · \(s.queued) queued · \(s.posted) posted")
-        if let at = s.usageObservedAt {
-            let f = DateFormatter(); f.dateFormat = "HH:mm"
-            parts.append("as of \(f.string(from: at))")
-        }
-        return parts.joined(separator: " · ")
     }
 
     private func agentPicker(label: String, value: String, options: [String],
@@ -374,5 +320,112 @@ struct AppTile: View {
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
         .background(Capsule().fill(color.opacity(0.14)))
+    }
+}
+
+
+/// Claude plan usage on the header line — the five-hour and weekly limits,
+/// each as a mini bar with its percent and reset time, the way Claude's own
+/// `/usage` reports them but in one row so it costs the deck no height.
+///
+/// There is no live number to show: a reading is what some request was told,
+/// so the tooltip says how old it is and who asked. The sweep agent refreshes
+/// it for free as a side effect of working; the ↻ sends a one-word Haiku
+/// message purely to be told, which costs a sliver of the thing being
+/// measured — hence a button, never a timer.
+struct PlanUsageInline: View {
+    let usage: AIUsage?
+    let probing: Bool
+    let error: String?
+    let onProbe: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(error == nil ? Color(hex: "c084fc") : Color(hex: "f87171"))
+            limit(label: "5h", window: usage?.fiveHour)
+            limit(label: "Week", window: usage?.sevenDay)
+            Button(action: onProbe) {
+                if probing {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white.opacity(0.5))
+            .disabled(probing)
+            .help("Ask Claude for a fresh reading (a one-word message; costs a sliver of the limit)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color.white.opacity(0.05)))
+        .help(tooltip)
+    }
+
+    private func limit(label: String, window: UsageWindow?) -> some View {
+        let pct = window?.pct
+        let color: Color = {
+            guard let v = pct else { return Color.white.opacity(0.3) }
+            if v >= 90 { return Color(hex: "f87171") }
+            if v >= 70 { return Color(hex: "f59e0b") }
+            return Color(hex: "4f8cff")
+        }()
+        return HStack(spacing: 5) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.1))
+                Capsule().fill(color)
+                    .frame(width: 44 * CGFloat(min(max((pct ?? 0) / 100, 0), 1)))
+            }
+            .frame(width: 44, height: 4)
+            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(pct == nil ? Color.white.opacity(0.35) : Color.white.opacity(0.85))
+                .frame(minWidth: 26, alignment: .trailing)
+            if let r = window?.resetsAt {
+                Text("↻ \(Self.resetText(r))")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .fixedSize()
+            }
+        }
+    }
+
+    private var tooltip: String {
+        var lines = ["Claude plan usage limits"]
+        if let f = usage?.fiveHour {
+            lines.append("5-hour limit: \(Int(f.pct.rounded()))%" + (f.resetsAt.map { " · resets \(Self.resetText($0))" } ?? ""))
+        }
+        if let w = usage?.sevenDay {
+            lines.append("Weekly · all models: \(Int(w.pct.rounded()))%" + (w.resetsAt.map { " · resets \(Self.resetText($0))" } ?? ""))
+        }
+        if let e = error { lines.append(e) }
+        if let u = usage {
+            lines.append("Last updated \(Self.ageText(u.observedAt)) · via \(u.source)")
+        } else {
+            lines.append("No reading yet — press ↻ to ask Claude, or start the sweep agent")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// "3:00 PM" today, else "Mon 10:00 PM" — the way Claude's own panel says it.
+    static func resetText(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = Calendar.current.isDateInToday(date) ? "h:mm a" : "EEE h:mm a"
+        return f.string(from: date)
+    }
+
+    static func ageText(_ date: Date) -> String {
+        let s = Int(Date().timeIntervalSince(date))
+        if s < 60 { return "just now" }
+        if s < 3600 { return "\(s / 60) min ago" }
+        if s < 86400 { let h = s / 3600; return "\(h) hour\(h == 1 ? "" : "s") ago" }
+        let d = s / 86400
+        return "\(d) day\(d == 1 ? "" : "s") ago"
     }
 }

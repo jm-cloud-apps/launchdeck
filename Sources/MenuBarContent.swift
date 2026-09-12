@@ -7,6 +7,9 @@ struct MenuBarContent: View {
 
     var body: some View {
         Text("Launch Deck \(appVersion) — \(manager.runningCount) running")
+        if let u = manager.aiUsage {
+            Text(usageLine(u))
+        }
 
         Divider()
 
@@ -73,15 +76,24 @@ struct MenuBarContent: View {
             .keyboardShortcut("q")
     }
 
+    private func usageLine(_ u: AIUsage) -> String {
+        var parts: [String] = []
+        if let f = u.fiveHour {
+            parts.append("5h \(Int(f.pct.rounded()))%" + (f.resetsAt.map { " (resets \(PlanUsageInline.resetText($0)))" } ?? ""))
+        }
+        if let w = u.sevenDay {
+            parts.append("week \(Int(w.pct.rounded()))%" + (w.resetsAt.map { " (resets \(PlanUsageInline.resetText($0)))" } ?? ""))
+        }
+        return "Claude: " + parts.joined(separator: " · ") + " · \(PlanUsageInline.ageText(u.observedAt))"
+    }
+
     private func agentLine(for app: ManagedApp) -> String {
         let cfg = manager.agentConfigs[app.id]
         let picks = cfg.map { "\($0.model.capitalized) · \($0.effort)" } ?? ""
         guard let s = manager.agentStatuses[app.id] else {
             return picks.isEmpty ? "Agent not running" : "Agent not running — \(picks)"
         }
-        let five = s.fiveHourPct.map { "AI \(Int($0.rounded()))%" } ?? "AI —"
-        let week = s.sevenDayPct.map { " · wk \(Int($0.rounded()))%" } ?? ""
-        return "\(five)\(week) · \(picks) · \(s.status.replacingOccurrences(of: "_", with: " "))"
+        return "\(picks) · \(s.status.replacingOccurrences(of: "_", with: " ")) · q\(s.queued) · \(s.posted) posted"
     }
 
     private var appVersion: String {
