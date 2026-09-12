@@ -46,10 +46,18 @@ struct AgentPanel: Codable, Equatable {
     // and the pickers show the VM's model/effort read-only. Defaulted so older
     // apps.json files decode unchanged.
     var remote: Bool = false
-    var host: String? = nil  // display only, e.g. "root@10.0.0.42" — where the VM lives
+    var host: String? = nil         // ssh target, e.g. "root@10.0.0.42" — where the VM agent lives
+    var serviceName: String? = nil  // systemd unit for remote Start/Stop, e.g. "ep-sweep-agent"
 
     var expandedConfigPath: String {
         (configPath as NSString).expandingTildeInPath
+    }
+
+    /// A remote agent is controllable only once `host` is a real ssh target
+    /// (user@host) and a service is named. Until then the tile's buttons are
+    /// disabled and say what to edit.
+    var remoteControllable: Bool {
+        remote && (host?.contains("@") ?? false) && (serviceName?.isEmpty == false)
     }
 
     /// The agent's persisted state, beside its config. Read for the plan-usage
@@ -221,6 +229,20 @@ enum AppConfig {
             if app.agent == nil, let panel = defaults[app.name]?.agent {
                 copy.agent = panel
                 changed = true
+            }
+            // A tile that already had an `agent` won't pick up sub-fields added
+            // to that agent later (serviceName, and the on-VM statusURL for
+            // remote control). Fill the ones that are nil/empty, leaving the
+            // user's own edits (notably `host`) untouched — same "only nil
+            // fields" rule the whole backfill follows.
+            if var agent = copy.agent, let def = defaults[app.name]?.agent {
+                if agent.serviceName == nil, let svc = def.serviceName {
+                    agent.serviceName = svc; changed = true
+                }
+                if agent.statusURL.isEmpty, !def.statusURL.isEmpty {
+                    agent.statusURL = def.statusURL; changed = true
+                }
+                copy.agent = agent
             }
             return copy
         }
@@ -428,13 +450,16 @@ let defaultApps: [ManagedApp] = [
         readyPort: nil,
         url: nil,
         agent: AgentPanel(
-            statusURL: "",
-            // expandedStatePath → …/vm-telemetry/state.json, where the poller writes.
+            // The on-VM status URL; Launch Deck curls it over ssh (loopback stays private).
+            statusURL: "http://127.0.0.1:8765/status",
+            // expandedStatePath → …/vm-telemetry/state.json, where the fetch caches.
             configPath: "~/Library/Application Support/LaunchDeck/vm-telemetry/config.json",
             models: ["opus", "sonnet", "haiku"],
             efforts: ["low", "medium", "high", "xhigh", "max"],
             remote: true,
-            host: "your VM"    // edit in apps.json to your VM host, e.g. root@10.0.0.42
+            // Edit these two in apps.json to enable control:
+            host: "your VM",          // → root@10.0.0.42
+            serviceName: "ep-sweep-agent"
         )
     ),
 ]

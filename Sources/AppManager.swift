@@ -33,6 +33,9 @@ final class AppManager: ObservableObject {
     /// Keeps an app showing "Stopping" while a kill is in flight, so polling
     /// doesn't flip it back to "Running" before the ports actually drain.
     private var stoppingUntil: [String: Date] = [:]
+    /// Last time each remote agent's `/status` was fetched over ssh, so the
+    /// 2.5s poll can throttle the expensive round-trip to ~15s.
+    private var lastRemoteFetch: [String: Date] = [:]
     private var timer: Timer?
 
     init() {
@@ -52,41 +55,69 @@ final class AppManager: ObservableObject {
     func refresh() {
         let apps = self.apps
         let wantsSchedules = apps.contains { $0.schedule != nil }
+        // Decide (on the main actor) which remote agents are due for an ssh
+        // status fetch. Throttled to ~15s: the poll fires every 2.5s, but an
+        // ssh round-trip is expensive, so most ticks just re-read the cached
+        // file. Marked now so overlapping ticks can't stack ssh calls.
+        let now = Date()
+        var dueRemote = Set<String>()
+        for app in apps where app.agent?.remote == true {
+            guard app.agent?.host?.contains("@") == true else { continue }
+            if lastRemoteFetch[app.id].map({ now.timeIntervalSince($0) >= 15 }) ?? true {
+                dueRemote.insert(app.id)
+                lastRemoteFetch[app.id] = now
+            }
+        }
         DispatchQueue.global(qos: .utility).async {
             let listening = Shell.listeningPorts()
             let labels = wantsSchedules ? Shell.scheduledLaunchdLabels() : []
-            // Agents: the status body only exists while the port is up, but the
-            // config file is there either way — read it so the pickers work on a
-            // stopped agent, which is when you'd set them.
             var statuses: [String: AgentStatus] = [:]
             var configs: [String: AgentConfig] = [:]
             var readings: [AIUsage] = [PlanUsage.readProbe()].compactMap { $0 }
             // For a remote agent there is no local port; its pill comes from how
-            // fresh the synced state file is. Computed here, applied after
-            // applyStatuses (which would otherwise mark a portless app stopped).
-            var remotePill: [String: AppStatus] = [:]
+            // fresh the status is. Computed here, applied (grace-aware) after
+            // applyStatuses, which would otherwise mark a portless app stopped.
+            var remoteFreshLive: [String: Bool] = [:]
             for app in apps {
                 guard let panel = app.agent else { continue }
                 configs[app.id] = AgentFiles.readConfig(panel)
-                if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
                 if panel.remote {
-                    let st = AgentFiles.readStateStatus(panel)
+                    // Fetch over ssh when due (also caches to the state file),
+                    // else re-read the last cached file.
+                    var st: AgentStatus? = dueRemote.contains(app.id) ? AgentFiles.fetchRemoteStatus(panel) : nil
+                    if st == nil { st = AgentFiles.readStateStatus(panel) }
                     if let st { statuses[app.id] = st }
-                    // Fresh telemetry + a live status word ⇒ Running; stale or
-                    // absent ⇒ Stopped (the poller has gone quiet / VM is off).
                     let fresh = st?.updatedAt.map { Date().timeIntervalSince($0) < 180 } ?? false
                     let live = ["running", "sweeping", "cooldown", "paused_limit",
                                 "waiting_backend", "idle", "starting"].contains(st?.status ?? "")
-                    remotePill[app.id] = (fresh && live) ? .running : .stopped
-                } else if !Set(app.ports).intersection(listening).isEmpty,
-                          let status = AgentFiles.fetchStatus(panel) {
-                    statuses[app.id] = status
+                    remoteFreshLive[app.id] = fresh && live
+                    if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
+                } else {
+                    if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
+                    if !Set(app.ports).intersection(listening).isEmpty,
+                       let status = AgentFiles.fetchStatus(panel) {
+                        statuses[app.id] = status
+                    }
                 }
             }
             DispatchQueue.main.async {
                 self.applyStatuses(apps: apps, listening: listening)
                 if wantsSchedules { self.applySchedules(apps: apps, labels: labels) }
-                for (id, pill) in remotePill { self.statuses[id] = pill }
+                // Remote pill: honour an optimistic Start/Stop grace first (so a
+                // just-issued systemctl doesn't snap back before telemetry
+                // catches up), then the freshness verdict.
+                let now = Date()
+                for app in apps where app.agent?.remote == true {
+                    if let until = self.pendingUntil[app.id], until > now {
+                        self.statuses[app.id] = .starting
+                    } else if let until = self.stoppingUntil[app.id], until > now {
+                        self.statuses[app.id] = .stopping
+                    } else {
+                        self.statuses[app.id] = (remoteFreshLive[app.id] ?? false) ? .running : .stopped
+                        self.pendingUntil[app.id] = nil
+                        self.stoppingUntil[app.id] = nil
+                    }
+                }
                 self.agentStatuses = statuses
                 for (id, cfg) in configs where self.agentConfigs[id] != cfg {
                     self.agentConfigs[id] = cfg
@@ -235,6 +266,7 @@ final class AppManager: ObservableObject {
     }
 
     func start(_ app: ManagedApp) {
+        if app.agent?.remote == true { remoteControl(app, "start"); return }
         // Ignore if it's already coming up or running. Launching a second
         // ./start.sh on top of a live one leaves orphans fighting over the
         // ports, which is what makes a tile bounce back to "Stopped".
@@ -251,6 +283,7 @@ final class AppManager: ObservableObject {
     }
 
     func stop(_ app: ManagedApp) {
+        if app.agent?.remote == true { remoteControl(app, "stop"); return }
         statuses[app.id] = .stopping
         pendingUntil[app.id] = nil
         // Hold "Stopping" until ports drain; 10s cap covers SIGTERM + SIGKILL.
@@ -263,9 +296,46 @@ final class AppManager: ObservableObject {
         }
     }
 
+    /// Start / stop / restart a REMOTE agent by driving its systemd unit over
+    /// ssh. The optimistic pill (Starting/Stopping) is held by pendingUntil /
+    /// stoppingUntil so the poll's freshness verdict doesn't snap it back before
+    /// the VM and the next status fetch catch up; clearing lastRemoteFetch makes
+    /// that fetch happen on the very next tick.
+    func remoteControl(_ app: ManagedApp, _ verb: String) {
+        guard let panel = app.agent, panel.remoteControllable,
+              let host = panel.host, let svc = panel.serviceName else {
+            appendLog(app, "REMOTE \(verb) — set agent.host (user@host) and agent.serviceName " +
+                           "in apps.json first")
+            return
+        }
+        if verb == "stop" {
+            statuses[app.id] = .stopping
+            pendingUntil[app.id] = nil
+            stoppingUntil[app.id] = Date().addingTimeInterval(30)
+        } else {                                   // start / restart
+            statuses[app.id] = .starting
+            stoppingUntil[app.id] = nil
+            pendingUntil[app.id] = Date().addingTimeInterval(75)   // agent boots + waits for backend
+        }
+        lastRemoteFetch[app.id] = nil              // force a fresh ssh status fetch next tick
+        appendLog(app, "REMOTE \(verb) — systemctl \(verb) \(svc) on \(host)")
+        let command = "\(AgentFiles.remoteBase(host)) \("systemctl \(verb) \(svc)".shellQuoted)"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Shell.runLoginResult(command)
+            if result.status != 0 {
+                let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    self.appendLog(app, "REMOTE \(verb) failed (exit \(result.status))" +
+                                        (detail.isEmpty ? "" : " — \(detail)"))
+                }
+            }
+        }
+    }
+
     /// Force-stop, let the ports drain, then relaunch — all in one detached
     /// shell so the new servers reparent to launchd just like a fresh Start.
     func restart(_ app: ManagedApp) {
+        if app.agent?.remote == true { remoteControl(app, "restart"); return }
         statuses[app.id] = .stopping
         pendingUntil[app.id] = Date().addingTimeInterval(40)
         // Show "Stopping" only during the brief kill window; once the old ports
@@ -282,7 +352,20 @@ final class AppManager: ObservableObject {
 
     /// Open an app's log file in the default viewer (Console / TextEdit) so you
     /// can see what happened — including failures like "npm: command not found".
+    /// For a remote agent there is no local log, so fetch the VM service's
+    /// recent journal over ssh into a temp file and open that.
     func openLog(_ app: ManagedApp) {
+        if let panel = app.agent, panel.remote {
+            appendLog(app, "REMOTE LOGS — journalctl \(panel.serviceName ?? "?")")
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(app.id)-journal.log")
+            DispatchQueue.global(qos: .userInitiated).async {
+                let text = AgentFiles.remoteJournal(panel)
+                try? text.data(using: .utf8)?.write(to: url)
+                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+            }
+            return
+        }
         let url = logURL(for: app)
         if !FileManager.default.fileExists(atPath: url.path) {
             try? Data().write(to: url)   // create empty so there's something to open

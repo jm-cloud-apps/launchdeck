@@ -140,10 +140,12 @@ struct AppTile: View {
                 statusPill
             }
 
-            // A remote agent has no local process, so its Start/Stop/Restart/Open
-            // buttons would act on nothing here — control it over ssh on the VM.
-            // The tile is monitor-only; the agent rows below carry the telemetry.
-            if app.agent?.remote != true {
+            // A remote agent drives its VM systemd unit over ssh (Start/Stop =
+            // systemctl, Logs = journalctl). The buttons are disabled until its
+            // host is set in apps.json, with a help string saying so.
+            let controlReady = (app.agent?.remote != true) || (app.agent?.remoteControllable ?? false)
+            let controlHelp = controlReady ? nil
+                : "Set agent.host (user@host) and agent.serviceName in apps.json to control the VM"
             // Only the primary action is labelled; the rest are icon-only so a
             // narrow tile still fits the whole row without truncating.
             HStack(spacing: 7) {
@@ -152,17 +154,23 @@ struct AppTile: View {
                         Label("Start", systemImage: "play.fill")
                     }
                     .buttonStyle(DeckButton(tint: accent, filled: true))
+                    .disabled(!controlReady)
+                    .opacity(controlReady ? 1 : 0.45)
+                    .help(controlHelp ?? "Start")
                 } else {
                     Button(action: onStop) {
                         Label("Stop", systemImage: "stop.fill")
                     }
                     .buttonStyle(DeckButton(tint: Color(hex: "f87171"), filled: false))
+                    .disabled(!controlReady)
+                    .opacity(controlReady ? 1 : 0.45)
 
                     Button(action: onRestart) {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(DeckButton(tint: accent, filled: false, compact: true))
-                    .help("Force-stop and start again")
+                    .disabled(!controlReady)
+                    .help(controlHelp ?? "Force-stop and start again")
 
                     if app.url != nil {
                         Button(action: onOpen) {
@@ -179,9 +187,8 @@ struct AppTile: View {
                     Image(systemName: "doc.text")
                 }
                 .buttonStyle(DeckButton(tint: Color(hex: "94a3b8"), filled: false, compact: true))
-                .help("View log")
+                .help(app.agent?.remote == true ? "View the VM service journal" : "View log")
             }
-            }   // end: non-remote control row
 
             if app.schedule != nil { scheduleRow }
             if app.agent != nil { agentRows }

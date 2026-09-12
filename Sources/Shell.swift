@@ -189,6 +189,40 @@ enum AgentFiles {
         return AgentStatus(json: json)
     }
 
+    /// Fetch a REMOTE agent's `/status` over ssh and cache it to the state file.
+    /// The VM's status port is loopback-only, so we curl it on the far side.
+    /// Writing the body to `expandedStatePath` means the usage strip and the
+    /// freshness logic read the same data — so the tile is live even without the
+    /// standalone launchd poller. nil on any failure (unreachable / agent down).
+    static func remoteBase(_ host: String) -> String {
+        "ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new \(host.shellQuoted)"
+    }
+
+    static func fetchRemoteStatus(_ panel: AgentPanel) -> AgentStatus? {
+        guard let host = panel.host, host.contains("@") else { return nil }
+        let url = panel.statusURL.isEmpty ? "http://127.0.0.1:8765/status" : panel.statusURL
+        let out = Shell.runLogin("\(remoteBase(host)) \("curl -s --max-time 5 \(url)".shellQuoted)")
+        guard let data = out.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let status = AgentStatus(json: json) else { return nil }
+        let path = panel.expandedStatePath
+        try? FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? data.write(to: URL(fileURLWithPath: path))
+        return status
+    }
+
+    /// The remote service's recent journal, for the Logs button. Returns the
+    /// text (or an error line), never throws.
+    static func remoteJournal(_ panel: AgentPanel, lines: Int = 200) -> String {
+        guard let host = panel.host, host.contains("@"), let svc = panel.serviceName else {
+            return "Set agent.host (user@host) and agent.serviceName in apps.json first."
+        }
+        let out = Shell.runLogin(
+            "\(remoteBase(host)) \("journalctl -u \(svc) -n \(lines) --no-pager".shellQuoted)")
+        return out.isEmpty ? "No output — is \(svc) installed on \(host)?" : out
+    }
+
     /// The agent's config, falling back to the first entry of each picker list
     /// when the file is missing or unreadable (the agent seeds the same
     /// defaults on its first cycle, so the tile and the agent agree).

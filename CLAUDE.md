@@ -137,19 +137,30 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   whatever the agent's last request reported — there is no live query, and the
   tile's tooltip stamps the time so it is never mistaken for one. New `agent`
   field → `backfillNewFields` fills it, same as `schedule`.
-- **A REMOTE agent (`AgentPanel.remote`) is monitor-only.** It runs on another
-  machine (a cloud VM); Launch Deck never reaches its port. A Mac-side poller
-  (`vm-agent-deployment/scripts/telemetry-pull.sh`, a 30s launchd job) fetches
-  the VM's `/status` over ssh and writes it to the panel's `expandedStatePath`
-  under `~/Library/Application Support/LaunchDeck/vm-telemetry/`. The tile reads
-  that file: `AgentFiles.readStateStatus` builds the `AgentStatus`, and the
-  app-status pill comes from the file's `updated_at` freshness (fresh + a live
-  status word ⇒ Running; ≥180s stale ⇒ Stopped, with the detail line saying
-  "Stale · last telemetry … ago"). Such a tile hides Start/Stop/Restart/Open
-  (control the VM agent over ssh/systemd) and shows model/effort **read-only**
-  (the VM owns its config). Ports are `[]`, so `applyStatuses` marks it stopped
-  and the remote-pill override (computed in `refresh`) sets the real state
-  afterwards. The "EP Sweep Agent (VM)" default app is the one instance.
+- **A REMOTE agent (`AgentPanel.remote`) runs on another machine (a cloud VM)
+  and is driven over ssh.** Launch Deck never reaches its port directly; instead
+  `AgentFiles.fetchRemoteStatus` runs `ssh <host> curl 127.0.0.1:8765/status`
+  (loopback stays private), **throttled to ~15s** via `lastRemoteFetch` since
+  the 2.5s poll is far too fast for an ssh round-trip, and caches the body to
+  the panel's `expandedStatePath` under
+  `~/Library/Application Support/LaunchDeck/vm-telemetry/` so the usage strip and
+  freshness reads share it. `readStateStatus` re-reads that cache on the ticks
+  between fetches, and (optionally) the `vm-agent-deployment` launchd poller
+  keeps it warm while Launch Deck is closed. The app-status pill comes from the
+  cache's `updated_at` freshness (fresh + a live status word ⇒ Running; ≥180s
+  ⇒ Stopped, detail "Stale · last telemetry … ago"), honouring a
+  pending/stopping **grace** after a control action so a just-issued systemctl
+  doesn't snap back. **Control:** `start`/`stop`/`restart` route through
+  `remoteControl` → `ssh <host> systemctl <verb> <serviceName>`, and the Logs
+  button fetches `journalctl -u <serviceName>` to a temp file. The buttons are
+  disabled until `remoteControllable` (host is `user@host` and a service is
+  named). Model/effort stay **read-only** on a remote tile (the VM owns its
+  config; edit it there). Ports are `[]`, so `applyStatuses` marks it stopped
+  and the grace-aware remote override in `refresh` sets the real state after.
+  New agent sub-fields (`serviceName`, remote `statusURL`) reach an
+  already-seeded tile through `backfillNewFields`, which fills only nil/empty
+  ones so a user's edited `host` is preserved. The "EP Sweep Agent (VM)" default
+  app is the one instance.
 
 ### Grid sizing (the deck should never need scrolling)
 
