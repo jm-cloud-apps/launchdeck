@@ -20,12 +20,14 @@ final class AppManager: ObservableObject {
     /// Each agent's model/effort, read back from its config file every poll so
     /// the pickers track a hand edit as well as their own writes.
     @Published private(set) var agentConfigs: [String: AgentConfig] = [:]
-    /// Claude plan usage for the deck-wide panel: the newest reading across every
-    /// agent's state file and the last manual probe. nil until something has
-    /// asked Claude at least once.
+    /// Claude plan usage for the deck-wide panel: the live account reading,
+    /// fetched every `usageInterval` (and on ↻), with each agent's state file
+    /// as a fallback between fetches. nil until something has reported once.
     @Published private(set) var aiUsage: AIUsage?
-    @Published private(set) var usageProbing = false
-    @Published private(set) var usageProbeError: String?
+    @Published private(set) var usageRefreshing = false
+    /// Why the last live fetch produced nothing (sign-in missing/expired,
+    /// offline). Cleared by the next success; the strip turns red while set.
+    @Published private(set) var usageError: String?
 
     /// Keeps a freshly-launched app showing "Starting" until its port comes up
     /// (or this deadline passes), so polling doesn't snap it back to "Stopped".
@@ -37,6 +39,11 @@ final class AppManager: ObservableObject {
     /// 2.5s poll can throttle the expensive round-trip to ~15s.
     private var lastRemoteFetch: [String: Date] = [:]
     private var timer: Timer?
+    private var usageTimer: Timer?
+    /// How often the live usage fetch runs. The endpoint costs no limit, but
+    /// the numbers only move as fast as requests are made, so a minute is
+    /// plenty — and it keeps the keychain read off the 2.5s poll.
+    static let usageInterval: TimeInterval = 60
 
     init() {
         apps = AppConfig.load()
@@ -45,6 +52,10 @@ final class AppManager: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
             // Timer fires on the main run loop, so we're already on the main actor.
             MainActor.assumeIsolated { self?.refresh() }
+        }
+        refreshUsage()
+        usageTimer = Timer.scheduledTimer(withTimeInterval: Self.usageInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshUsage() }
         }
     }
 
@@ -73,7 +84,7 @@ final class AppManager: ObservableObject {
             let labels = wantsSchedules ? Shell.scheduledLaunchdLabels() : []
             var statuses: [String: AgentStatus] = [:]
             var configs: [String: AgentConfig] = [:]
-            var readings: [AIUsage] = [PlanUsage.readProbe()].compactMap { $0 }
+            var readings: [AIUsage] = [PlanUsage.readCache()].compactMap { $0 }
             // For a remote agent there is no local port; its pill comes from how
             // fresh the status is. Computed here, applied (grace-aware) after
             // applyStatuses, which would otherwise mark a portless app stopped.
@@ -88,8 +99,14 @@ final class AppManager: ObservableObject {
                     if st == nil { st = AgentFiles.readStateStatus(panel) }
                     if let st { statuses[app.id] = st }
                     let fresh = st?.updatedAt.map { Date().timeIntervalSince($0) < 180 } ?? false
-                    let live = ["running", "sweeping", "cooldown", "paused_limit",
-                                "waiting_backend", "idle", "starting"].contains(st?.status ?? "")
+                    // Every state a living process reports — including parked at
+                    // the cap and erroring — so the pill says whether there is
+                    // something to Stop, not whether it is being productive.
+                    // `halted_error` is NOT live: the breaker exited the
+                    // process, so the pill must say Stopped (with the red
+                    // detail line saying why) and offer Start.
+                    let live = ["running", "sweeping", "cooldown", "paused_limit", "halted_limit",
+                                "waiting_backend", "idle", "starting", "error"].contains(st?.status ?? "")
                     remoteFreshLive[app.id] = fresh && live
                     if let u = PlanUsage.readAgentState(panel, source: app.name) { readings.append(u) }
                 } else {
@@ -122,29 +139,72 @@ final class AppManager: ObservableObject {
                 for (id, cfg) in configs where self.agentConfigs[id] != cfg {
                     self.agentConfigs[id] = cfg
                 }
-                // Newest wins, whoever asked. A probe from a minute ago beats
-                // the agent's reading from an hour ago and vice versa.
+                // Newest wins, whoever asked. The live fetch normally is, but
+                // an agent's rate_limit_event from ten seconds ago beats a
+                // fetch from fifty seconds ago — and is all there is when the
+                // fetch is failing.
                 let newest = readings.max { $0.observedAt < $1.observedAt }
                 if newest != self.aiUsage { self.aiUsage = newest }
             }
         }
     }
 
+    // MARK: - Ordering
+
+    /// Drag-to-reorder UI state (lives here rather than as @State because
+    /// build.sh compiles with bare swiftc, which lacks the macro plugin the
+    /// current SDK's @State needs). `dropTarget` is the row being hovered.
+    @Published var dropTarget: String?
+    @Published var dropAtEnd = false
+
+    /// Drag-to-reorder: put the app with `id` where `target` currently sits
+    /// (before it), shifting the rest. Persisted at once so the order survives
+    /// a relaunch; the status maps are keyed by id, so nothing else moves.
+    func move(_ id: String, before target: String) {
+        guard id != target,
+              let from = apps.firstIndex(where: { $0.id == id }),
+              let to = apps.firstIndex(where: { $0.id == target }) else { return }
+        let app = apps.remove(at: from)
+        apps.insert(app, at: to > from ? to - 1 : to)
+        AppConfig.save(apps)
+    }
+
+    /// Drop past the last row: move to the end.
+    func moveToEnd(_ id: String) {
+        guard let from = apps.firstIndex(where: { $0.id == id }), from != apps.count - 1 else { return }
+        let app = apps.remove(at: from)
+        apps.append(app)
+        AppConfig.save(apps)
+    }
+
     // MARK: - Plan usage
 
-    /// Refresh the usage panel by sending Claude a message. Manual only.
-    func probeUsage() {
-        guard !usageProbing else { return }
-        usageProbing = true
-        usageProbeError = nil
+    /// After a 429 the timer skips fetches until this passes (the ↻ button
+    /// still forces one) — the endpoint rate-limits per account, and every
+    /// relaunch fetches at once, so a burst of them earns a pause.
+    private var usageBackoffUntil: Date?
+
+    /// Fetch the live account usage — on the timer and from the ↻ button.
+    /// Off the main thread: the keychain read and the request both block.
+    func refreshUsage(force: Bool = false) {
+        guard !usageRefreshing else { return }
+        if !force, let until = usageBackoffUntil, until > Date() { return }
+        usageRefreshing = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = PlanUsage.probe()
+            let result = PlanUsage.fetchLive()
             DispatchQueue.main.async {
-                self.usageProbing = false
-                if let u = result {
+                self.usageRefreshing = false
+                switch result {
+                case .reading(let u):
+                    self.usageError = nil
                     self.aiUsage = u
-                } else {
-                    self.usageProbeError = "No reading — is `claude` installed and signed in?"
+                case .failed(let why):
+                    // Keep showing the last reading; the footer says why it
+                    // is not moving.
+                    self.usageError = why
+                    if why.hasPrefix("rate limited") {
+                        self.usageBackoffUntil = Date().addingTimeInterval(5 * 60)
+                    }
                 }
             }
         }
@@ -163,6 +223,39 @@ final class AppManager: ObservableObject {
         if let e = effort, panel.efforts.contains(e) { cfg.effort = e }
         agentConfigs[app.id] = cfg          // optimistic; the poll re-reads the file
         appendLog(app, "AGENT CONFIG — model \(cfg.model), effort \(cfg.effort) (applies next cycle)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            AgentFiles.writeConfig(panel, cfg)
+        }
+    }
+
+    /// Set whether the agent carries on by itself after its usage cap resets.
+    /// Local: merged into the config file like model/effort. Remote: merged
+    /// into the VM's file over ssh. Either way the agent picks it up at the
+    /// top of its next cycle — and if it is parked (halted_limit) with the
+    /// flag off, turning it on is what lets it go.
+    func setAgentResume(_ app: ManagedApp, _ on: Bool) {
+        guard let panel = app.agent, panel.configWritable else { return }
+        appendLog(app, "AGENT CONFIG — auto-resume after limit \(on ? "ON" : "OFF") (applies next cycle)")
+        if panel.remote {
+            // Optimistic: reflect it in the cached status until the next fetch
+            // reads the VM's own config back.
+            if var st = agentStatuses[app.id] { st.resumeAfterLimit = on; agentStatuses[app.id] = st }
+            lastRemoteFetch[app.id] = nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                let r = AgentFiles.writeRemoteConfigKey(panel, key: "resume_after_limit", value: on)
+                if r.status != 0 {
+                    let detail = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    DispatchQueue.main.async {
+                        self.appendLog(app, "REMOTE config write failed (exit \(r.status))" +
+                                            (detail.isEmpty ? "" : " — \(detail)"))
+                    }
+                }
+            }
+            return
+        }
+        var cfg = agentConfigs[app.id] ?? AgentFiles.readConfig(panel)
+        cfg.resumeAfterLimit = on
+        agentConfigs[app.id] = cfg
         DispatchQueue.global(qos: .userInitiated).async {
             AgentFiles.writeConfig(panel, cfg)
         }

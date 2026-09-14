@@ -46,18 +46,19 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   (`stopped` / `starting` / `running`), and `AppConfig` (loads/seeds the JSON
   config). Also holds `defaultApps`, the seed list.
 - **`Shell.swift`** — `PlanUsage` (reads Claude plan usage out of an agent's
-  state file or the last probe, and `probe()` runs the one-word Haiku message
-  that refreshes it), `AgentFiles` (an agent's `/status` fetch and its config
+  state file or the cached last fetch, and `fetchLive()` asks the account's
+  usage endpoint with the keychain OAuth token), `AgentFiles` (an agent's `/status` fetch and its config
   file read/merge-write) and `Shell.runLogin(_:)`, which runs a command through a login `zsh`
   (`zsh -lc`, so PATH includes node/python), `runLoginResult(_:)` adds the exit
   status; `Shell.listeningPorts()` parses `lsof` for the set of LISTENing TCP
   ports and `Shell.scheduledLaunchdLabels()` the set of live launchd labels.
   `String.shellQuoted` safely single-quotes interpolated values.
-- **`ContentView.swift`** — the grid window UI: header + `AppTile`s with
-  Start / Stop / Restart / Open buttons.
+- **`ContentView.swift`** — the window UI: header + one `AppRow` per app with
+  Start / Stop / Restart / Open / Logs in aligned columns.
 - **`MenuBarContent.swift`** — the menu-bar menu (same actions, plus Refresh /
   Open Window / Quit).
-- **`Theme.swift`** — `Color(hex:)` and the `DeckButton` button style.
+- **`Theme.swift`** — `Color(hex:)`, the `IOS` palette, and the `PillButton` /
+  `CircleButton` styles.
 - **`Icon/make_icon.swift`** — draws the app icon (run via `make_icon.sh`).
 
 ### How process control works (important before touching AppManager)
@@ -128,19 +129,28 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   into `agentConfigs` whether or not the agent is up, because the pickers are
   most useful on a stopped agent. **Plan usage is deck-wide, not per tile**
   (`PlanUsageInline` on the header line): it is a fact about the Claude account.
-  `aiUsage` is the newest of every agent's `state.json` `usage` block and the
-  last probe (`usage.json` in the support dir) — read as files, so it survives
-  the agent being stopped. `probeUsage()` is the only way to refresh without an
-  agent running and it spends limit, so it is never scheduled. `setAgentConfig` merge-writes only `model`
+  `aiUsage` is whichever is newest of the **live account fetch** and every
+  agent's `state.json` `usage` block. `refreshUsage()` runs on its own 60s
+  timer (and on ↻): `PlanUsage.fetchLive()` reads Claude Code's OAuth token
+  out of the `Claude Code-credentials` keychain item (via `/usr/bin/security`,
+  so macOS shows its own prompt once — "Always Allow") and GETs
+  `api.anthropic.com/api/oauth/usage`, the endpoint the Claude desktop app's
+  usage panel reads, so the deck matches it. It spends no limit. The result is
+  cached to `usage.json` in the support dir in the agent's shape, which is what
+  the strip shows at launch before the first fetch lands. On failure (no
+  sign-in, expired token, offline) the last reading stays and `usageError`
+  explains in the tooltip; nothing here refreshes the token — running `claude`
+  does. `setAgentConfig` merge-writes only `model`
   and `effort` into that file and leaves the agent's other keys alone; the
-  agent reads it per cycle, so nothing here restarts anything. The usage % is
-  whatever the agent's last request reported — there is no live query, and the
-  tile's tooltip stamps the time so it is never mistaken for one. New `agent`
+  agent reads it per cycle, so nothing here restarts anything. New `agent`
   field → `backfillNewFields` fills it, same as `schedule`.
 - **A REMOTE agent (`AgentPanel.remote`) runs on another machine (a cloud VM)
   and is driven over ssh.** Launch Deck never reaches its port directly; instead
-  `AgentFiles.fetchRemoteStatus` runs `ssh <host> curl 127.0.0.1:8765/status`
-  (loopback stays private), **throttled to ~15s** via `lastRemoteFetch` since
+  `AgentFiles.fetchRemoteStatus` runs `ssh <host> curl 127.0.0.1:8765/status
+  || cat <state.json beside remoteConfigPath>` (loopback stays private; the
+  `cat` fallback is what lets a Stop show within one fetch — the agent's last
+  act is writing `status: stopped` there, and without it the cache would keep
+  the final live body and say Running until it went stale), **throttled to ~15s** via `lastRemoteFetch` since
   the 2.5s poll is far too fast for an ssh round-trip, and caches the body to
   the panel's `expandedStatePath` under
   `~/Library/Application Support/LaunchDeck/vm-telemetry/` so the usage strip and
@@ -162,23 +172,35 @@ and presents two scenes that share it: a single `Window` (the grid) and a
   ones so a user's edited `host` is preserved. The "EP Sweep Agent (VM)" default
   app is the one instance.
 
-### Grid sizing (the deck should never need scrolling)
+### Layout and look (iOS grouped style, since 1.13)
 
-The tile grid is tuned so the whole deck is visible at once. Three numbers are
-coupled — change one and re-check the others: the adaptive column `minimum`
-(210) in `ContentView`, the window `minWidth` (690, the narrowest width that
-still fits 3 columns), and `.defaultSize` (960×720) in `LaunchDeckApp`. At the
-default size the current 7 apps use ~370pt of ~496pt, so ~9 apps fit before
-scrolling returns; past that, widen `defaultSize` rather than shrinking tiles
-further. The `ScrollView` stays as the fallback for small windows.
+The window is one `ScrollView`: a large title, a **Claude Plan** card (two
+limit rows + a footer that always starts "Last refreshed … · via …", with any
+fetch error appended in red rather than replacing it), then an **Apps** card
+of `AppRow`s separated by inset dividers, and a footer explaining reorder.
+Colours come from `IOS` in `Theme.swift` (black background, `#1c1c1e` cards,
+system blue/green/red/orange) — use those tokens, not ad-hoc hex. Buttons are
+`PillButton` (the App Store "GET" capsule: Start blue, Stop red) and
+`CircleButton` (open-in-browser, and a "•••" `Menu` holding Restart / log /
+open). **Colour is by state, not by app**: an app's `color` fills only its
+icon square; the status dot and the Stop pill take the state colour. Don't
+reintroduce per-app coloured buttons or glows.
 
-A tile with a `schedule` is ~26pt taller, and `LazyVGrid` sizes a whole row to
-its tallest tile — so adding a second scheduled app to a *different* row costs
-another ~26pt, not zero. Keep `scheduleRow` to one line. A tile with an
-`agent` is ~40pt taller (pickers, detail line), which is why `defaultSize`
-is 620 high; keep `agentRows` to two lines. There are now two agent tiles
-(local + VM), so `defaultSize` is 720 high. The plan-usage strip sits on the
-header line (no height cost) and is why the default width is 960.
+A plain row is ~50pt; a `schedule` adds a line, an `agent` two. `.defaultSize`
+(860×780) fits the current 9 apps; the `ScrollView` is the fallback.
+`build.sh` compiles with bare `swiftc`, which lacks the macro plugin the
+current SDK's `@State` needs — so transient view state (the drag-over
+highlight) lives on `AppManager` as `@Published`, not as `@State`.
+
+**Reordering** is drag-and-drop: the ≡ handle on each row is `.draggable(id)`,
+each row and a strip after the last one are `.dropDestination`s;
+`AppManager.move(_:before:)` / `moveToEnd` reorder `apps` and call
+`AppConfig.save`, so the order persists in apps.json (the whole array is
+rewritten — a hand edit made while the app is open is lost, same as the
+schedule/agent writes).
+
+The usage fetch backs off 5 min after an HTTP 429 from the usage endpoint
+(`usageBackoffUntil`); the ↻ button forces one anyway.
 
 ## Versioning (bump on every change)
 

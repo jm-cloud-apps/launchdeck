@@ -42,20 +42,25 @@ there onto the Dock.
   window, so turning it off when you don't want that is the point. The switch
   reads its state straight from `launchd` each poll — flip the job in a terminal
   and the switch follows.
-- **Plan usage** — a strip on the header line shows your Claude plan's
-  **5-hour** and **weekly** limits with their reset times (hover for the
-  full breakdown), the numbers Claude's own `/usage` reports. There is no live query for this: a reading is what
-  some `claude` request was told, so the panel says how old it is and who
-  asked. The sweep agent refreshes it for free as it works; the ⟳ sends Claude
-  a one-word Haiku message purely to be told (it costs a sliver of the limit,
-  so it is a button, never a timer).
+- **Plan usage** — a card shows your Claude plan's **5-hour** and **weekly**
+  limits with their reset times and a "Last refreshed … ago" line — the live
+  account numbers, the same ones the Claude desktop
+  app's usage panel shows, fetched every minute (⟳ fetches now; it costs no
+  limit). It reads Claude Code's sign-in from the keychain, so the first
+  launch shows a keychain prompt — choose **Always Allow**. If you're signed
+  out or the token has expired, the strip turns red and the tooltip says so;
+  running `claude` once fixes it.
+- **Reorder** — drag a row's ≡ handle onto another row (or below the last) to
+  reorder the deck; the order is saved to `apps.json`.
 - **Remote agent over SSH** — an agent can run on another machine (a cloud VM)
   and appear here as a tile (*EP Sweep Agent (VM)*): live status, cycle, queue
   and usage fetched from the VM's status port over SSH (throttled ~15s), and
   **Start / Stop / Restart** drive its `systemd` unit over SSH (Logs shows the
   VM's `journalctl`). Set the tile's `agent.host` (`user@host`) and
   `agent.serviceName` in `apps.json` to enable control. Model/effort are
-  read-only (the VM owns its config). See the `vm-agent-deployment` repo.
+  read-only (the VM owns its config); the **Auto-resume** switch does write to
+  the VM (`agent.remoteConfigPath`, one key merged over SSH). See the
+  `vm-agent-deployment` repo.
 - **Background agents** — an app can own an AI agent: a loop of headless
   `claude` runs that reports itself over a loopback port. Launch Deck is the
   remote control only — the agent's logic lives in its own repo. The tile gets
@@ -65,7 +70,11 @@ there onto the Dock.
   The one that ships is QuantForge's *EP Sweep Agent*, which keeps grading
   swept episodic pivots into the study library while the subscription has
   limit left, and pauses itself at a cap (default 90%) until the window resets.
-  Start/Stop work like any tile — Stop reaches the running `claude` too.
+  The **Auto-resume after limit reset** switch (on by default) is what happens
+  next: on, it carries on by itself when the window refills; off, it parks
+  ("Halted") and keeps the next window for your own sessions until you press
+  Start — turning the switch back on also releases it. Start/Stop work like any
+  tile — Stop reaches the running `claude` too.
 - **Logs** — the `doc.text` button on each tile (and "View … log" in the menu)
   opens that app's log so you can see what happened, including failures like
   `npm: command not found`. Launch Deck also writes its own timestamped

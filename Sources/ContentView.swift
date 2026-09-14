@@ -1,105 +1,235 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
+/// The window: an iOS-style grouped screen — large title, a "Claude Plan"
+/// card with the two limits and when they were last read, then an "Apps"
+/// card of rows you can drag to reorder. Dark palette from `IOS` in Theme.
 struct ContentView: View {
     @ObservedObject var manager: AppManager
-
-    // Sized so the whole deck fits the default window without scrolling: at 900pt
-    // wide this lays out 3 columns, so 7 apps land in 3 rows with room to spare.
-    private let columns = [GridItem(.adaptive(minimum: 210, maximum: 320), spacing: 12)]
 
     /// Reads the version baked into Info.plist by build.sh (VERSION + git build #).
     private var appVersion: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
-        return "v\(short) (build \(build))"
+        return "v\(short) (\(build))"
     }
 
     var body: some View {
         ZStack {
-            LinearGradient(
-                colors: [Color(hex: "0b0f17"), Color(hex: "11161f")],
-                startPoint: .top, endPoint: .bottom
-            )
-            .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                header
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(manager.apps) { app in
-                            AppTile(
-                                app: app,
-                                status: manager.statuses[app.id] ?? .stopped,
-                                scheduled: manager.scheduled[app.id] ?? false,
-                                scheduleBusy: manager.scheduleBusy.contains(app.id),
-                                agentStatus: manager.agentStatuses[app.id],
-                                agentConfig: manager.agentConfigs[app.id],
-                                onStart: { manager.start(app) },
-                                onStop: { manager.stop(app) },
-                                onRestart: { manager.restart(app) },
-                                onOpen: { manager.open(app) },
-                                onLogs: { manager.openLog(app) },
-                                onSchedule: { manager.setScheduled(app, enabled: $0) },
-                                onAgentModel: { manager.setAgentConfig(app, model: $0) },
-                                onAgentEffort: { manager.setAgentConfig(app, effort: $0) }
-                            )
-                        }
-                    }
-                    .padding(16)
+            IOS.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    header
+                    usageSection
+                    appsSection
                 }
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 20)
             }
         }
-        // 690 is the narrowest width that still fits 3 tile columns
-        // (3×210 + 2×12 spacing + 2×16 padding); below it the grid drops to 2
-        // columns, which pushes the deck to 4 rows and brings scrolling back.
-        .frame(minWidth: 690, minHeight: 420)
+        .frame(minWidth: 620, minHeight: 480)
     }
 
+    // MARK: header
+
     private var header: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "gamecontroller.fill")
-                .font(.title2)
-                .foregroundStyle(Color(hex: "4f8cff"))
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("Launch Deck")
-                        .font(.title2.bold())
-                        .foregroundStyle(.white)
-                    Text(appVersion)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-                Text("\(manager.runningCount) running")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.5))
-            }
+        HStack(alignment: .firstTextBaseline) {
+            Text("Launch Deck")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(IOS.label)
+            Text(appVersion)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(IOS.tertiary)
             Spacer()
-            PlanUsageInline(usage: manager.aiUsage,
-                            probing: manager.usageProbing,
-                            error: manager.usageProbeError,
-                            onProbe: { manager.probeUsage() })
-            Spacer().frame(width: 6)
             Button { manager.refresh() } label: {
                 Image(systemName: "arrow.clockwise")
-                    .font(.body.weight(.semibold))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.6))
+            .buttonStyle(CircleButton())
             .help("Refresh status")
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+    }
+
+    // MARK: Claude plan
+
+    /// The two limits as iOS-style rows, and — the part that answers "is this
+    /// current?" — a footer stamping when the reading was taken and by whom,
+    /// re-rendered every 30s so the age keeps moving.
+    private var usageSection: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            VStack(alignment: .leading, spacing: 7) {
+                sectionHeader("Claude Plan", trailing: usageHeaderTrailing)
+                Card {
+                    limitRow(label: "5-hour limit", window: manager.aiUsage?.fiveHour)
+                    Divider().background(IOS.separator).padding(.leading, 16)
+                    limitRow(label: "Weekly limit", window: manager.aiUsage?.sevenDay)
+                }
+                usageFooter
+            }
+        }
+    }
+
+    private var usageHeaderTrailing: some View {
+        Button { manager.refreshUsage(force: true) } label: {
+            if manager.usageRefreshing {
+                ProgressView().controlSize(.mini)
+            } else {
+                Image(systemName: "arrow.clockwise")
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(IOS.blue)
+        .font(.system(size: 12, weight: .semibold))
+        .disabled(manager.usageRefreshing)
+        .help("Fetch the live account usage now (free — it refreshes every minute anyway)")
+    }
+
+    private func limitRow(label: String, window: UsageWindow?) -> some View {
+        let pct = window?.pct
+        let tint: Color = {
+            guard let v = pct else { return IOS.gray }
+            if v >= 90 { return IOS.red }
+            if v >= 70 { return IOS.orange }
+            return IOS.blue
+        }()
+        return HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(IOS.label)
+                Text(window?.resetsAt.map { "Resets \(PlanUsageInline.resetText($0))" } ?? "No reading yet")
+                    .font(.system(size: 11))
+                    .foregroundStyle(IOS.secondary)
+            }
+            .frame(width: 130, alignment: .leading)
+            ZStack(alignment: .leading) {
+                Capsule().fill(IOS.fill).frame(height: 6)
+                GeometryReader { geo in
+                    Capsule().fill(tint)
+                        .frame(width: geo.size.width * min(max((pct ?? 0) / 100, 0), 1), height: 6)
+                }
+                .frame(height: 6)
+            }
+            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
+                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                .foregroundStyle(pct == nil ? IOS.tertiary : IOS.label)
+                .frame(width: 46, alignment: .trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    /// "Last refreshed …" always leads, so a stale reading is never mistaken
+    /// for a live one; a fetch problem is appended in red rather than
+    /// replacing it, because the last good numbers are still what's shown.
+    private var usageFooter: some View {
+        let stamp: String = manager.aiUsage.map {
+            "Last refreshed \(PlanUsageInline.ageText($0.observedAt)) · via \($0.source) · refreshes every minute"
+        } ?? "No reading yet — press ↻ to fetch the live account usage."
+        return HStack(spacing: 0) {
+            Text(stamp)
+                .font(.system(size: 11))
+                .foregroundStyle(IOS.secondary)
+            if let e = manager.usageError {
+                Text(" · \(e)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(IOS.red)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: apps
+
+    private var appsSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            sectionHeader("Apps", trailing:
+                Text("\(manager.runningCount) running")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(IOS.secondary))
+            Card {
+                ForEach(Array(manager.apps.enumerated()), id: \.element.id) { index, app in
+                    if index > 0 {
+                        Divider().background(IOS.separator).padding(.leading, 62)
+                    }
+                    AppRow(
+                        app: app,
+                        status: manager.statuses[app.id] ?? .stopped,
+                        scheduled: manager.scheduled[app.id] ?? false,
+                        scheduleBusy: manager.scheduleBusy.contains(app.id),
+                        agentStatus: manager.agentStatuses[app.id],
+                        agentConfig: manager.agentConfigs[app.id],
+                        isDropTarget: manager.dropTarget == app.id,
+                        onStart: { manager.start(app) },
+                        onStop: { manager.stop(app) },
+                        onRestart: { manager.restart(app) },
+                        onOpen: { manager.open(app) },
+                        onLogs: { manager.openLog(app) },
+                        onSchedule: { manager.setScheduled(app, enabled: $0) },
+                        onAgentModel: { manager.setAgentConfig(app, model: $0) },
+                        onAgentEffort: { manager.setAgentConfig(app, effort: $0) },
+                        onAgentResume: { manager.setAgentResume(app, $0) }
+                    )
+                    // Drop a dragged row here: it lands before this one.
+                    .dropDestination(for: String.self) { items, _ in
+                        manager.dropTarget = nil
+                        guard let id = items.first else { return false }
+                        manager.move(id, before: app.id)
+                        return true
+                    } isTargeted: { over in
+                        manager.dropTarget = over ? app.id : (manager.dropTarget == app.id ? nil : manager.dropTarget)
+                    }
+                }
+                // A thin landing strip after the last row, so "move to the
+                // bottom" is possible.
+                Rectangle().fill(manager.dropAtEnd ? IOS.blue.opacity(0.5) : Color.clear)
+                    .frame(height: 3)
+                    .dropDestination(for: String.self) { items, _ in
+                        manager.dropAtEnd = false
+                        guard let id = items.first else { return false }
+                        manager.moveToEnd(id)
+                        return true
+                    } isTargeted: { manager.dropAtEnd = $0 }
+            }
+            Text("Drag the ≡ handle to reorder. Order is saved to apps.json.")
+                .font(.system(size: 11))
+                .foregroundStyle(IOS.tertiary)
+                .padding(.horizontal, 16)
+        }
+    }
+
+    private func sectionHeader<T: View>(_ title: String, trailing: T) -> some View {
+        HStack {
+            Text(title.uppercased())
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(IOS.secondary)
+                .kerning(0.4)
+            Spacer()
+            trailing
+        }
+        .padding(.horizontal, 16)
     }
 }
 
-struct AppTile: View {
+/// An inset grouped card — the iOS list container.
+struct Card<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .background(IOS.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+struct AppRow: View {
     let app: ManagedApp
     let status: AppStatus
     let scheduled: Bool
     let scheduleBusy: Bool
     let agentStatus: AgentStatus?
     let agentConfig: AgentConfig?
+    let isDropTarget: Bool
     let onStart: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
@@ -108,107 +238,111 @@ struct AppTile: View {
     let onSchedule: (Bool) -> Void
     let onAgentModel: (String) -> Void
     let onAgentEffort: (String) -> Void
+    let onAgentResume: (Bool) -> Void
 
+    /// The app's colour fills its icon square, the way Settings does — and
+    /// nothing else. State is what colours the rest: green running, orange
+    /// starting, red stopping/error.
     private var accent: Color { Color(hex: app.color) }
 
     var body: some View {
-        // Icon beside the title rather than above it — that one change is most of
-        // the height saving, and it's what lets the full deck fit on one screen.
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 9) {
+        // A remote agent drives its VM systemd unit over ssh (Start/Stop =
+        // systemctl, Logs = journalctl). The buttons are disabled until its
+        // host is set in apps.json, with a help string saying so.
+        let controlReady = (app.agent?.remote != true) || (app.agent?.remoteControllable ?? false)
+        let controlHelp = controlReady ? nil
+            : "Set agent.host (user@host) and agent.serviceName in apps.json to control the VM"
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                // The iOS Settings icon: colour-filled rounded square, white glyph.
                 ZStack {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(accent.opacity(0.18))
-                        .frame(width: 36, height: 36)
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(accent)
+                        .frame(width: 30, height: 30)
                     Image(systemName: app.icon)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(accent)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(app.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(IOS.label)
                         .lineLimit(1)
                     Text(app.subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 11))
+                        .foregroundStyle(IOS.secondary)
                         .lineLimit(1)
                 }
+                .frame(minWidth: 120, alignment: .leading)
 
-                Spacer(minLength: 4)
-                statusPill
-            }
+                Spacer(minLength: 8)
 
-            // A remote agent drives its VM systemd unit over ssh (Start/Stop =
-            // systemctl, Logs = journalctl). The buttons are disabled until its
-            // host is set in apps.json, with a help string saying so.
-            let controlReady = (app.agent?.remote != true) || (app.agent?.remoteControllable ?? false)
-            let controlHelp = controlReady ? nil
-                : "Set agent.host (user@host) and agent.serviceName in apps.json to control the VM"
-            // Only the primary action is labelled; the rest are icon-only so a
-            // narrow tile still fits the whole row without truncating.
-            HStack(spacing: 7) {
-                if status == .stopped {
-                    Button(action: onStart) {
-                        Label("Start", systemImage: "play.fill")
+                statusLabel
+                    .frame(width: 76, alignment: .trailing)
+
+                HStack(spacing: 8) {
+                    if status == .stopped {
+                        Button("Start", action: onStart)
+                            .buttonStyle(PillButton(tint: IOS.blue))
+                            .disabled(!controlReady)
+                            .opacity(controlReady ? 1 : 0.45)
+                            .help(controlHelp ?? "Start")
+                    } else {
+                        Button("Stop", action: onStop)
+                            .buttonStyle(PillButton(tint: IOS.red))
+                            .disabled(!controlReady)
+                            .opacity(controlReady ? 1 : 0.45)
                     }
-                    .buttonStyle(DeckButton(tint: accent, filled: true))
-                    .disabled(!controlReady)
-                    .opacity(controlReady ? 1 : 0.45)
-                    .help(controlHelp ?? "Start")
-                } else {
-                    Button(action: onStop) {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
-                    .buttonStyle(DeckButton(tint: Color(hex: "f87171"), filled: false))
-                    .disabled(!controlReady)
-                    .opacity(controlReady ? 1 : 0.45)
-
-                    Button(action: onRestart) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(DeckButton(tint: accent, filled: false, compact: true))
-                    .disabled(!controlReady)
-                    .help(controlHelp ?? "Force-stop and start again")
-
-                    if app.url != nil {
-                        Button(action: onOpen) {
-                            Image(systemName: "arrow.up.right.square")
+                    Button(action: onOpen) { Image(systemName: "arrow.up.right") }
+                        .buttonStyle(CircleButton())
+                        .disabled(status != .running || app.url == nil)
+                        .opacity(status == .running && app.url != nil ? 1 : 0.3)
+                        .help(app.url == nil ? "No URL" : "Open in browser")
+                    Menu {
+                        Button("Restart", action: onRestart)
+                            .disabled(status == .stopped || !controlReady)
+                        Button(app.agent?.remote == true ? "View VM journal" : "View log", action: onLogs)
+                        if app.url != nil {
+                            Button("Open in browser", action: onOpen).disabled(status != .running)
                         }
-                        .buttonStyle(DeckButton(tint: accent, filled: false, compact: true))
-                        .disabled(status != .running)
-                        .opacity(status == .running ? 1 : 0.45)
-                        .help("Open in browser")
+                    } label: {
+                        Image(systemName: "ellipsis")
                     }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .buttonStyle(CircleButton(tint: IOS.secondary))
+                    .frame(width: 26, height: 26)
+                    .help("More")
                 }
 
-                Button(action: onLogs) {
-                    Image(systemName: "doc.text")
-                }
-                .buttonStyle(DeckButton(tint: Color(hex: "94a3b8"), filled: false, compact: true))
-                .help(app.agent?.remote == true ? "View the VM service journal" : "View log")
+                // Reorder handle — the iOS edit-mode grip. Drag it onto
+                // another row to move this app there.
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(IOS.tertiary)
+                    .frame(width: 18)
+                    .contentShape(Rectangle())
+                    .draggable(app.id)
+                    .help("Drag to reorder")
             }
 
             if app.schedule != nil { scheduleRow }
             if app.agent != nil { agentRows }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.04))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14)
-                        .stroke(borderColor, lineWidth: 1.2)
-                )
-        )
-        .shadow(color: status == .running ? accent.opacity(0.28) : .clear, radius: 10, y: 3)
-        .animation(.easeInOut(duration: 0.25), value: status)
+        .padding(.leading, 16)
+        .padding(.trailing, 12)
+        .padding(.vertical, 9)
+        .background(isDropTarget ? IOS.blue.opacity(0.12) : Color.clear)
+        .overlay(alignment: .top) {
+            if isDropTarget { Rectangle().fill(IOS.blue).frame(height: 2) }
+        }
+        .animation(.easeInOut(duration: 0.2), value: status)
     }
 
-    /// The launchd timer switch, for apps that have a background job. Kept to a
-    /// single short row: it adds ~26pt to the tile, and the grid is tuned so the
-    /// whole deck fits without scrolling.
+    /// The launchd timer switch, for apps that have a background job — one
+    /// short indented line under the name.
     @ViewBuilder
     private var scheduleRow: some View {
         if let job = app.schedule {
@@ -216,91 +350,114 @@ struct AppTile: View {
             HStack(spacing: 6) {
                 Image(systemName: on ? "clock.arrow.2.circlepath" : "clock.badge.xmark")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(on ? accent : Color.white.opacity(0.35))
+                    .foregroundStyle(on ? IOS.blue : IOS.tertiary)
                 Text(job.caption)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(on ? 0.72 : 0.4))
+                    .font(.system(size: 11))
+                    .foregroundStyle(on ? IOS.label.opacity(0.85) : IOS.secondary)
                     .lineLimit(1)
-                Spacer(minLength: 4)
                 Toggle("", isOn: Binding(get: { on }, set: onSchedule))
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.mini)
-                    .tint(accent)
+                    .tint(IOS.green)
                     .disabled(scheduleBusy)
+                Spacer()
             }
-            .padding(.top, 2)
+            .padding(.leading, 42)
             .help(on
                   ? "Scheduled runs are on (launchd: \(job.label))"
                   : "Scheduled runs are off — nothing runs in the background")
         }
     }
 
-    /// The background-agent block: the two pickers and what the agent is
-    /// doing. Two short rows (~40pt). Plan usage is deck-wide, not per tile —
-    /// it is a fact about the Claude account, and lives under the header.
+    /// The background-agent block, indented under the name: the pickers and
+    /// the auto-resume switch on one line, what the agent is doing on the
+    /// next. Plan usage is deck-wide, not per row — it has its own card.
     @ViewBuilder
     private var agentRows: some View {
         if let panel = app.agent {
-            VStack(alignment: .leading, spacing: 5) {
-                if panel.remote {
-                    // Monitor-only: the VM owns the config, so show what it is
-                    // running read-only (change it over ssh on the VM). Values
-                    // come from the synced telemetry, not a local config file.
-                    HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    if panel.remote {
+                        // Monitor-only: the VM owns the config, so show what it
+                        // is running read-only (change it over ssh on the VM).
                         readOnlyPick(label: "Model", value: agentStatus?.model?.capitalized ?? "—")
                         readOnlyPick(label: "Effort", value: agentStatus?.effort ?? "—")
-                    }
-                    .help(panel.host.map { "Runs on \($0) — set model/effort over ssh" }
-                          ?? "Runs on the VM — set model/effort over ssh")
-                } else {
-                    let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
-                                                         effort: panel.efforts.first ?? "")
-                    HStack(spacing: 6) {
+                    } else {
+                        let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
+                                                             effort: panel.efforts.first ?? "")
                         agentPicker(label: "Model", value: cfg.model, options: panel.models,
                                     onChange: onAgentModel)
                         agentPicker(label: "Effort", value: cfg.effort, options: panel.efforts,
                                     onChange: onAgentEffort)
                     }
-                    .help("Applies at the start of the agent's next cycle")
+                    resumeRow(panel)
+                    Spacer()
                 }
+                .help(panel.remote
+                      ? (panel.host.map { "Runs on \($0) — set model/effort over ssh" }
+                         ?? "Runs on the VM — set model/effort over ssh")
+                      : "Applies at the start of the agent's next cycle")
 
                 Text(agentDetail)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.5))
+                    .font(.system(size: 11))
+                    .foregroundStyle(["error", "halted_error"].contains(agentStatus?.status ?? "")
+                                     ? IOS.red : IOS.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .padding(.top, 2)
+            .padding(.leading, 42)
         }
+    }
+
+    /// What the agent does at its usage cap. On (default): waits for the
+    /// window to reset and carries on by itself. Off: parks ("Halted") and the
+    /// next window is yours — press Start to spend it. A remote row reads the
+    /// VM's own setting out of the telemetry and writes it back over ssh; a
+    /// local one uses the config file like the pickers.
+    private func resumeRow(_ panel: AgentPanel) -> some View {
+        let value: Bool = panel.remote
+            ? (agentStatus?.resumeAfterLimit ?? true)
+            : (agentConfig?.resumeAfterLimit ?? true)
+        let parked = agentStatus?.status == "halted_limit"
+        return HStack(spacing: 5) {
+            Toggle("", isOn: Binding(get: { value }, set: onAgentResume))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(IOS.green)
+                .disabled(!panel.configWritable)
+            Text(parked ? "Auto-resume off · parked at cap" : "Auto-resume")
+                .font(.system(size: 11))
+                .foregroundStyle(parked ? IOS.orange : IOS.secondary)
+                .lineLimit(1)
+        }
+        .help(panel.configWritable
+              ? (value ? "At the usage cap the agent waits for the window to reset, then continues."
+                       : "At the usage cap the agent parks until you press Start — the next window is yours.")
+              : "Set agent.host and agent.remoteConfigPath in apps.json to change this over ssh")
     }
 
     /// Read-only twin of `agentPicker` for a remote agent — same footprint,
     /// no menu (the VM owns the setting).
     private func readOnlyPick(label: String, value: String) -> some View {
-        HStack(spacing: 3) {
-            Text(label)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.4))
-            Text(value)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 11)).foregroundStyle(IOS.secondary)
+            Text(value).font(.system(size: 11, weight: .semibold)).foregroundStyle(IOS.label.opacity(0.85))
         }
     }
 
     private func agentPicker(label: String, value: String, options: [String],
                              onChange: @escaping (String) -> Void) -> some View {
-        HStack(spacing: 3) {
-            Text(label)
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.white.opacity(0.4))
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 11)).foregroundStyle(IOS.secondary)
             Picker("", selection: Binding(get: { value }, set: onChange)) {
                 ForEach(options, id: \.self) { Text($0.capitalized).tag($0) }
             }
             .labelsHidden()
             .pickerStyle(.menu)
             .controlSize(.mini)
-            .tint(accent)
+            .tint(IOS.blue)
         }
     }
 
@@ -324,6 +481,8 @@ struct AppTile: View {
         let prefix: String
         switch s.status {
         case "paused_limit":    prefix = "Paused"
+        case "halted_limit":    prefix = "Halted"
+        case "halted_error":    prefix = "Halted"   // the breaker tripped; detail says why
         case "waiting_backend": prefix = "Waiting"
         case "sweeping":        prefix = "Sweeping"
         case "cooldown":        prefix = "Cooling down"
@@ -352,127 +511,40 @@ struct AppTile: View {
         return "\(s / 86400)d"
     }
 
-    private var borderColor: Color {
+    private var stateColor: Color {
         switch status {
-        case .running: return accent.opacity(0.55)
-        case .starting: return Color(hex: "f59e0b").opacity(0.5)
-        case .stopping: return Color(hex: "f87171").opacity(0.5)
-        case .stopped: return Color.white.opacity(0.08)
+        case .running: return IOS.green
+        case .starting: return IOS.orange
+        case .stopping: return IOS.red
+        case .stopped: return IOS.tertiary
         }
     }
 
-    private var statusPill: some View {
-        let (text, color): (String, Color) = {
+    /// Dot + word, in the state colour; muted when there is nothing to say.
+    private var statusLabel: some View {
+        let text: String = {
             switch status {
-            case .running: return ("Running", Color(hex: "34d399"))
-            case .starting: return ("Starting", Color(hex: "f59e0b"))
-            case .stopping: return ("Stopping…", Color(hex: "f87171"))
-            case .stopped: return ("Stopped", Color(hex: "94a3b8"))
+            case .running: return "Running"
+            case .starting: return "Starting"
+            case .stopping: return "Stopping…"
+            case .stopped: return "Stopped"
             }
         }()
-        return HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
+        return HStack(spacing: 5) {
+            Circle().fill(stateColor).frame(width: 6, height: 6)
             Text(text)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(color)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(status == .stopped ? IOS.secondary : stateColor)
                 .fixedSize()
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.14)))
     }
 }
 
 
-/// Claude plan usage on the header line — the five-hour and weekly limits,
-/// each as a mini bar with its percent and reset time, the way Claude's own
-/// `/usage` reports them but in one row so it costs the deck no height.
-///
-/// There is no live number to show: a reading is what some request was told,
-/// so the tooltip says how old it is and who asked. The sweep agent refreshes
-/// it for free as a side effect of working; the ↻ sends a one-word Haiku
-/// message purely to be told, which costs a sliver of the thing being
-/// measured — hence a button, never a timer.
-struct PlanUsageInline: View {
-    let usage: AIUsage?
-    let probing: Bool
-    let error: String?
-    let onProbe: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "bolt.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(error == nil ? Color(hex: "c084fc") : Color(hex: "f87171"))
-            limit(label: "5h", window: usage?.fiveHour)
-            limit(label: "Week", window: usage?.sevenDay)
-            Button(action: onProbe) {
-                if probing {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.5))
-            .disabled(probing)
-            .help("Ask Claude for a fresh reading (a one-word message; costs a sliver of the limit)")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color.white.opacity(0.05)))
-        .help(tooltip)
-    }
-
-    private func limit(label: String, window: UsageWindow?) -> some View {
-        let pct = window?.pct
-        let color: Color = {
-            guard let v = pct else { return Color.white.opacity(0.3) }
-            if v >= 90 { return Color(hex: "f87171") }
-            if v >= 70 { return Color(hex: "f59e0b") }
-            return Color(hex: "4f8cff")
-        }()
-        return HStack(spacing: 5) {
-            Text(label)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.1))
-                Capsule().fill(color)
-                    .frame(width: 44 * CGFloat(min(max((pct ?? 0) / 100, 0), 1)))
-            }
-            .frame(width: 44, height: 4)
-            Text(pct.map { "\(Int($0.rounded()))%" } ?? "—")
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(pct == nil ? Color.white.opacity(0.35) : Color.white.opacity(0.85))
-                .frame(minWidth: 26, alignment: .trailing)
-            if let r = window?.resetsAt {
-                Text("↻ \(Self.resetText(r))")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .fixedSize()
-            }
-        }
-    }
-
-    private var tooltip: String {
-        var lines = ["Claude plan usage limits"]
-        if let f = usage?.fiveHour {
-            lines.append("5-hour limit: \(Int(f.pct.rounded()))%" + (f.resetsAt.map { " · resets \(Self.resetText($0))" } ?? ""))
-        }
-        if let w = usage?.sevenDay {
-            lines.append("Weekly · all models: \(Int(w.pct.rounded()))%" + (w.resetsAt.map { " · resets \(Self.resetText($0))" } ?? ""))
-        }
-        if let e = error { lines.append(e) }
-        if let u = usage {
-            lines.append("Last updated \(Self.ageText(u.observedAt)) · via \(u.source)")
-        } else {
-            lines.append("No reading yet — press ↻ to ask Claude, or start the sweep agent")
-        }
-        return lines.joined(separator: "\n")
-    }
-
+/// Date/age formatting shared by the plan card and the menu bar line.
+/// (The header strip it was named for is gone; the card in ContentView and
+/// `MenuBarContent.usageLine` are its readers.)
+enum PlanUsageInline {
     /// "3:00 PM" today, else "Mon 10:00 PM" — the way Claude's own panel says it.
     static func resetText(_ date: Date) -> String {
         let f = DateFormatter()
