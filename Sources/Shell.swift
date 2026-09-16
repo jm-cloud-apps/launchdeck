@@ -265,21 +265,36 @@ enum AgentFiles {
         // stamped seconds before Stop) and the tile says Running for the 180s
         // it takes that stamp to go stale.
         var far = "curl -s --max-time 5 \(url)"
+        // The VM's config.json rides along in the same ssh session and lands
+        // in the tile's configPath — a local MIRROR of the file the agent
+        // will read at its next cycle. Only a live /status carries a `config`
+        // block; a stopped agent's state.json does not, so without this the
+        // auto-resume switch (and model/effort) read `nil ?? true` every
+        // poll and snapped back ON seconds after being turned off, while the
+        // write over ssh had in fact landed. The file is the truth; show it.
         if let cfg = panel.remoteConfigPath, !cfg.isEmpty {
             let state = ((cfg as NSString).deletingLastPathComponent as NSString)
                 .appendingPathComponent("state.json")
-            far += " || cat \(state.shellQuoted)"
+            far = "(\(far) || cat \(state.shellQuoted)); printf '\\n\(configMarker)\\n'; cat \(cfg.shellQuoted) 2>/dev/null"
         }
         let out = Shell.runLogin("\(remoteBase(host)) \(far.shellQuoted)")
-        guard let data = out.data(using: .utf8),
+        let parts = out.components(separatedBy: "\n\(configMarker)\n")
+        guard let data = parts[0].data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let status = AgentStatus(json: json) else { return nil }
         let path = panel.expandedStatePath
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? data.write(to: URL(fileURLWithPath: path))
+        if parts.count > 1, let cdata = parts[1].data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: cdata) as? [String: Any]) != nil {
+            try? cdata.write(to: URL(fileURLWithPath: panel.expandedConfigPath))
+        }
         return status
     }
+
+    /// Separates the status body from the config body in one ssh round trip.
+    private static let configMarker = "@@launchdeck-config@@"
 
     /// Merge ONE key into a remote agent's config.json over ssh, preserving the
     /// rest of the file — the same "touch only your key" rule as writeConfig,

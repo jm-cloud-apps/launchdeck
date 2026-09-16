@@ -381,8 +381,9 @@ struct AppRow: View {
                     if panel.remote {
                         // Monitor-only: the VM owns the config, so show what it
                         // is running read-only (change it over ssh on the VM).
-                        readOnlyPick(label: "Model", value: agentStatus?.model?.capitalized ?? "—")
-                        readOnlyPick(label: "Effort", value: agentStatus?.effort ?? "—")
+                        readOnlyPick(label: "Model",
+                                     value: (agentStatus?.model ?? agentConfig?.model)?.capitalized ?? "—")
+                        readOnlyPick(label: "Effort", value: agentStatus?.effort ?? agentConfig?.effort ?? "—")
                     } else {
                         let cfg = agentConfig ?? AgentConfig(model: panel.models.first ?? "",
                                                              effort: panel.efforts.first ?? "")
@@ -412,13 +413,15 @@ struct AppRow: View {
 
     /// What the agent does at its usage cap. On (default): waits for the
     /// window to reset and carries on by itself. Off: parks ("Halted") and the
-    /// next window is yours — press Start to spend it. A remote row reads the
-    /// VM's own setting out of the telemetry and writes it back over ssh; a
-    /// local one uses the config file like the pickers.
+    /// next window is yours — press Start to spend it. Both rows read the
+    /// config file — a remote one through the local mirror the status fetch
+    /// keeps (see fetchRemoteStatus), with the live /status payload as the
+    /// fallback before the first fetch — and write it back where the agent
+    /// reads it: the file, or the VM's file over ssh.
     private func resumeRow(_ panel: AgentPanel) -> some View {
-        let value: Bool = panel.remote
-            ? (agentStatus?.resumeAfterLimit ?? true)
-            : (agentConfig?.resumeAfterLimit ?? true)
+        let value: Bool = agentConfig?.resumeAfterLimit
+            ?? agentStatus?.resumeAfterLimit
+            ?? true
         let parked = agentStatus?.status == "halted_limit"
         return HStack(spacing: 5) {
             Toggle("", isOn: Binding(get: { value }, set: onAgentResume))

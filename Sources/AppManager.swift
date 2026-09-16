@@ -237,9 +237,14 @@ final class AppManager: ObservableObject {
         guard let panel = app.agent, panel.configWritable else { return }
         appendLog(app, "AGENT CONFIG — auto-resume after limit \(on ? "ON" : "OFF") (applies next cycle)")
         if panel.remote {
-            // Optimistic: reflect it in the cached status until the next fetch
-            // reads the VM's own config back.
+            // Optimistic: reflect it in the cached status AND the local mirror
+            // of the VM's config (what the row reads each poll) until the next
+            // fetch brings the VM's own file back.
             if var st = agentStatuses[app.id] { st.resumeAfterLimit = on; agentStatuses[app.id] = st }
+            var mirror = agentConfigs[app.id] ?? AgentFiles.readConfig(panel)
+            mirror.resumeAfterLimit = on
+            agentConfigs[app.id] = mirror
+            AgentFiles.writeConfig(panel, mirror)
             lastRemoteFetch[app.id] = nil
             DispatchQueue.global(qos: .userInitiated).async {
                 let r = AgentFiles.writeRemoteConfigKey(panel, key: "resume_after_limit", value: on)
