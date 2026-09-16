@@ -521,7 +521,7 @@ struct AppRow: View {
                 .disabled(!canSave)
                 .help(!dirty ? "Type a new cap, then Save"
                       : (valid5 && valid7
-                         ? "Write both caps to the agent's config (it checks them at the top of every cycle)"
+                         ? "Write both caps to the agent's config (checked before every candidate)"
                          : "Caps are 1–100"))
             if dirty {
                 Button("Revert") {
@@ -535,7 +535,7 @@ struct AppRow: View {
             Spacer()
         }
         .disabled(!panel.configWritable)
-        .help("Plan utilization at which the agent stops starting new cycles in that window — the rest is yours. Checked at the top of every cycle; a cycle in flight finishes.")
+        .help("Plan utilization at which the agent stops in that window — the rest is yours. Checked before every candidate; the one in hand finishes, so it can overshoot by about one candidate (~5–10 points on opus).")
     }
 
     private func agentPicker(label: String, value: String, options: [String],
