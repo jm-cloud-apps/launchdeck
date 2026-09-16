@@ -48,6 +48,10 @@ struct AgentPanel: Codable, Equatable {
     var remote: Bool = false
     var host: String? = nil         // ssh target, e.g. "root@10.0.0.42" — where the VM agent lives
     var serviceName: String? = nil  // systemd unit for remote Start/Stop, e.g. "ep-sweep-agent"
+    // The agent's config.json ON THE VM. The auto-resume toggle merge-writes a
+    // key into it over ssh (the agent re-reads the file every cycle). nil = the
+    // toggle is shown read-only for this remote tile.
+    var remoteConfigPath: String? = nil
 
     var expandedConfigPath: String {
         (configPath as NSString).expandingTildeInPath
@@ -60,9 +64,15 @@ struct AgentPanel: Codable, Equatable {
         remote && (host?.contains("@") ?? false) && (serviceName?.isEmpty == false)
     }
 
+    /// Whether a config key can be written where the agent will read it: the
+    /// local file for a local agent, or the VM file over ssh for a remote one.
+    var configWritable: Bool {
+        remote ? (remoteControllable && (remoteConfigPath?.isEmpty == false)) : true
+    }
+
     /// The agent's persisted state, beside its config. Read for the plan-usage
-    /// panel even when the agent is down — it is the last `rate_limit_event`
-    /// the agent saw, which is the freshest figure available without spending.
+    /// panel even when the agent is down — the last `rate_limit_event` the
+    /// agent saw, which can be newer than the last live account fetch.
     var expandedStatePath: String {
         ((expandedConfigPath as NSString).deletingLastPathComponent as NSString)
             .appendingPathComponent("state.json")
@@ -76,17 +86,18 @@ struct UsageWindow: Equatable {
 }
 
 /// Claude plan usage — the five-hour and weekly limits — plus where and when
-/// the reading came from. There is no live query for this: a figure is what
-/// some `claude` request was told, so it always carries its timestamp.
+/// the reading came from: the live account fetch, or what some agent's last
+/// `claude` request was told. It always carries its timestamp so the two can
+/// be ranked.
 struct AIUsage: Equatable {
     var fiveHour: UsageWindow?
     var sevenDay: UsageWindow?
     var observedAt: Date
-    var source: String     // "EP Sweep Agent" or "probe"
+    var source: String     // "account" or an agent's app name
 
     /// Decodes the shape the sweep agent writes (`usage` in its state.json):
     /// `{"five_hour": {"pct": 63, "resets_at": 1789173600}, "seven_day": {…},
-    ///   "observed_at": 1789170000}`. The probe writes the same shape.
+    ///   "observed_at": 1789170000}`. The live fetch caches the same shape.
     init?(json: [String: Any], source: String) {
         guard let at = json["observed_at"] as? Double else { return nil }
         func window(_ key: String) -> UsageWindow? {
@@ -114,7 +125,9 @@ struct AgentStatus: Equatable {
     var sessionsSwept: Int
     var model: String?           // what the agent is running (for the read-only remote tile)
     var effort: String?
-    var capPct: Double?          // config.max_utilization_pct, when the payload carries config
+    var fiveHourCapPct: Int?     // config.max_five_hour_pct, when the payload carries config
+    var sevenDayCapPct: Int?     // config.max_seven_day_pct
+    var resumeAfterLimit: Bool?  // config.resume_after_limit — the VM's own setting, for the remote toggle
     var updatedAt: Date?         // state's own timestamp — drives the "via VM · Xs ago" freshness
 
     init?(json: [String: Any]) {
@@ -128,16 +141,28 @@ struct AgentStatus: Equatable {
         sessionsSwept = cov?["sessions"] as? Int ?? 0
         model = json["model"] as? String
         effort = json["effort"] as? String
-        capPct = (json["config"] as? [String: Any])?["max_utilization_pct"] as? Double
+        let cfg = json["config"] as? [String: Any]
+        fiveHourCapPct = (cfg?["max_five_hour_pct"] as? NSNumber)?.intValue
+        sevenDayCapPct = (cfg?["max_seven_day_pct"] as? NSNumber)?.intValue
+        resumeAfterLimit = cfg?["resume_after_limit"] as? Bool
         if let t = json["updated_at"] as? Double { updatedAt = Date(timeIntervalSince1970: t) }
     }
 }
 
-/// The two fields the tile's pickers own, read back from the agent's config
-/// file each poll so a hand edit shows up too.
+/// The fields the tile's controls own, read back from the agent's config
+/// file each poll so a hand edit shows up too. `resumeAfterLimit` is what the
+/// agent does at its usage cap: wait for the window and carry on (true, the
+/// default), or park until Start is pressed again (false). The two caps are
+/// the plan utilization at which it stops starting cycles — one for the
+/// five-hour session window, one for the week — so the rest is yours.
 struct AgentConfig: Equatable {
     var model: String
     var effort: String
+    var resumeAfterLimit: Bool = true
+    var fiveHourCapPct: Int = 90
+    var sevenDayCapPct: Int = 90
+
+    static let capRange = 1...100
 }
 
 /// One launchable project. Decoded from apps.json so you can add apps
@@ -242,12 +267,21 @@ enum AppConfig {
                 if agent.statusURL.isEmpty, !def.statusURL.isEmpty {
                     agent.statusURL = def.statusURL; changed = true
                 }
+                if agent.remoteConfigPath == nil, let rc = def.remoteConfigPath {
+                    agent.remoteConfigPath = rc; changed = true
+                }
                 copy.agent = agent
             }
             return copy
         }
         return (filled, changed)
     }
+
+    /// Persist the user's ordering (drag-to-reorder in the window). Only the
+    /// order changes; every field on every app is the caller's copy of what
+    /// `load()` returned, so a hand edit to apps.json made while the app is
+    /// open would be overwritten — same trade-off as the schedule/agent writes.
+    static func save(_ apps: [ManagedApp]) { write(apps) }
 
     private static func write(_ apps: [ManagedApp]) {
         let encoder = JSONEncoder()
@@ -459,7 +493,9 @@ let defaultApps: [ManagedApp] = [
             remote: true,
             // Edit these two in apps.json to enable control:
             host: "your VM",          // → root@10.0.0.42
-            serviceName: "ep-sweep-agent"
+            serviceName: "ep-sweep-agent",
+            // Where setup-vm.sh puts the tree; the auto-resume toggle writes here.
+            remoteConfigPath: "/opt/quantforge/backend/data/ep_sweep_agent/config.json"
         )
     ),
 ]

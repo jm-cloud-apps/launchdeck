@@ -18,26 +18,54 @@ extension Color {
     }
 }
 
-struct DeckButton: ButtonStyle {
-    var tint: Color
-    var filled: Bool
-    /// Icon-only buttons hug their content instead of splitting the row evenly,
-    /// so the labelled action (Start / Stop) keeps the width it needs on a
-    /// narrow tile.
-    var compact: Bool = false
+/// The iOS dark palette, so the deck reads like a Settings / App Store
+/// screen rather than a terminal: black grouped background, #1c1c1e cards,
+/// system blue/green/red/orange for state, secondary labels at 60%.
+enum IOS {
+    static let background = Color(hex: "000000")
+    static let card       = Color(hex: "1c1c1e")
+    static let fill       = Color(hex: "2c2c2e")     // tertiary fill: pills, tracks
+    static let separator  = Color.white.opacity(0.12)
+    static let label      = Color.white
+    static let secondary  = Color(hex: "ebebf5").opacity(0.6)
+    static let tertiary   = Color(hex: "ebebf5").opacity(0.3)
+    static let blue   = Color(hex: "0a84ff")
+    static let green  = Color(hex: "30d158")
+    static let red    = Color(hex: "ff453a")
+    static let orange = Color(hex: "ff9f0a")
+    static let purple = Color(hex: "bf5af2")
+    static let gray   = Color(hex: "8e8e93")
+}
+
+/// The App Store "GET" pill: capsule of tertiary fill with bold coloured text.
+struct PillButton: ButtonStyle {
+    var tint: Color = IOS.blue
+    var width: CGFloat? = 72
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(filled ? Color.black : tint)
+            .font(.system(size: 12, weight: .bold))
+            .foregroundStyle(tint)
             .padding(.vertical, 6)
-            .padding(.horizontal, compact ? 8 : 10)
-            .frame(maxWidth: compact ? nil : .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(filled ? tint : tint.opacity(0.14))
-            )
-            .opacity(configuration.isPressed ? 0.65 : 1)
-            .contentShape(Rectangle())
+            .padding(.horizontal, 12)
+            .frame(width: width)
+            .background(Capsule().fill(IOS.fill))
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .contentShape(Capsule())
+    }
+}
+
+/// A round secondary-action button (the iOS "ⓘ" / "•••" shape).
+struct CircleButton: ButtonStyle {
+    var tint: Color = IOS.blue
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 26, height: 26)
+            .background(Circle().fill(IOS.fill))
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .contentShape(Circle())
     }
 }

@@ -94,10 +94,12 @@ enum Shell {
 }
 
 
-/// Claude plan usage: where the numbers come from and how to ask for fresh ones.
-/// Blocking — call off the main thread.
+/// Claude plan usage: where the numbers come from. The live account fetch is
+/// the source of truth; the agent's state file and the cached last fetch are
+/// what fills the strip before the first fetch lands. Blocking — call off
+/// the main thread.
 enum PlanUsage {
-    static var probeURL: URL { AppConfig.supportDir.appendingPathComponent("usage.json") }
+    static var cacheURL: URL { AppConfig.supportDir.appendingPathComponent("usage.json") }
 
     /// The `usage` block out of an agent's state.json, if it has one.
     static func readAgentState(_ panel: AgentPanel, source: String) -> AIUsage? {
@@ -108,51 +110,107 @@ enum PlanUsage {
         return AIUsage(json: usage, source: source)
     }
 
-    /// The last probe result, if any.
-    static func readProbe() -> AIUsage? {
-        guard let data = try? Data(contentsOf: probeURL),
+    /// The last live fetch, cached — so the strip has a number at launch
+    /// before the first fetch of this run comes back.
+    static func readCache() -> AIUsage? {
+        guard let data = try? Data(contentsOf: cacheURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
-        return AIUsage(json: json, source: "probe")
+        return AIUsage(json: json, source: "account")
     }
 
-    /// Ask Claude for a fresh reading the only way there is: send a message.
-    ///
-    /// A one-word Haiku turn with no tools is the cheapest request that still
-    /// carries a `rate_limit_event` — the same numbers `/usage` shows in a
-    /// session. It spends a sliver of the limit it is measuring, which is why
-    /// this is a button and never a timer. Through an interactive login shell
-    /// because `claude` lives under nvm's bin, same as `npm` does.
-    /// Returns nil (and writes nothing) if the event never arrives.
-    static func probe() -> AIUsage? {
-        let out = Shell.runLogin(
-            "claude -p 'Reply with the single word OK' --model haiku --effort low " +
-            "--output-format stream-json --verbose --tools '' --no-session-persistence 2>/dev/null",
-            interactive: true)
-        for line in out.split(separator: "\n") {
-            guard let data = line.data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  event["type"] as? String == "rate_limit_event",
-                  let info = event["rate_limit_info"] as? [String: Any]
-            else { continue }
-            let windows = info["unifiedWindows"] as? [String: Any] ?? [:]
-            var json: [String: Any] = ["observed_at": Date().timeIntervalSince1970,
-                                       "status": info["status"] ?? "unknown"]
-            for key in ["five_hour", "seven_day"] {
-                guard let w = windows[key] as? [String: Any],
-                      let util = w["utilization"] as? Double else { continue }
-                // Utilization arrives as a fraction; stored as a percent, the
-                // agent's convention, so one decoder serves both files.
-                json[key] = ["pct": (util <= 1 ? util * 100 : util).rounded(),
-                             "resets_at": w["resetsAt"] ?? info["resetsAt"] ?? NSNull()]
-            }
-            guard let usage = AIUsage(json: json, source: "probe") else { continue }
-            if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? data.write(to: probeURL)
-            }
-            return usage
+    /// Where Claude Code keeps its sign-in on macOS: one keychain item holding
+    /// `{"claudeAiOauth": {"accessToken": …}}`. Read through `security` so the
+    /// first read shows the standard keychain prompt — "Always Allow" there and
+    /// it never asks again. Only the token is read; nothing is written back.
+    static let keychainService = "Claude Code-credentials"
+    static let usageEndpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+
+    /// What a live fetch can say: a reading, or why there is none.
+    enum LiveResult {
+        case reading(AIUsage)
+        case failed(String)
+    }
+
+    /// Ask the account for the live numbers — the same endpoint the Claude
+    /// desktop app's usage panel reads, so this always matches it. Costs no
+    /// limit, which is why it can run on a timer. `utilization` arrives as a
+    /// percent and `resets_at` as ISO-8601 with fractional seconds; both are
+    /// written to `usage.json` in the agent's shape so one decoder serves all.
+    static func fetchLive() -> LiveResult {
+        guard let token = keychainToken() else {
+            return .failed("No Claude sign-in found — run `claude` and sign in once")
         }
-        return nil
+        var request = URLRequest(url: usageEndpoint)
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let done = DispatchSemaphore(value: 0)
+        var body: Data?
+        var code = 0
+        var failure: String?
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { done.signal() }
+            body = data
+            code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            failure = error?.localizedDescription
+        }.resume()
+        _ = done.wait(timeout: .now() + 10)
+        if let failure { return .failed("Usage fetch failed: \(failure)") }
+        if code == 401 || code == 403 {
+            return .failed("Claude sign-in expired — run `claude` once to refresh it")
+        }
+        if code == 429 {
+            // The endpoint has its own rate limit; the caller backs off.
+            return .failed("rate limited by the usage endpoint — retrying in a few minutes")
+        }
+        guard code == 200, let body,
+              let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        else { return .failed("Usage fetch failed (HTTP \(code))") }
+
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        var out: [String: Any] = ["observed_at": Date().timeIntervalSince1970]
+        for key in ["five_hour", "seven_day"] {
+            guard let w = json[key] as? [String: Any],
+                  let util = w["utilization"] as? Double else { continue }
+            var window: [String: Any] = ["pct": util.rounded()]
+            if let r = w["resets_at"] as? String,
+               let date = iso.date(from: r) ?? plain.date(from: r) {
+                window["resets_at"] = date.timeIntervalSince1970
+            }
+            out[key] = window
+        }
+        guard let usage = AIUsage(json: out, source: "account") else {
+            return .failed("Usage fetch returned no limits")
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted]) {
+            try? data.write(to: cacheURL)
+        }
+        return .reading(usage)
+    }
+
+    /// The OAuth access token out of the keychain, or nil if there is no
+    /// sign-in (or the prompt was denied). `security` is called directly, not
+    /// through a login shell, so nothing in `~/.zshrc` can see the secret.
+    private static func keychainToken() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", keychainService, "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, !token.isEmpty
+        else { return nil }
+        return token
     }
 }
 
@@ -193,7 +251,7 @@ enum AgentFiles {
     /// The VM's status port is loopback-only, so we curl it on the far side.
     /// Writing the body to `expandedStatePath` means the usage strip and the
     /// freshness logic read the same data — so the tile is live even without the
-    /// standalone launchd poller. nil on any failure (unreachable / agent down).
+    /// standalone launchd poller. nil on any failure (unreachable).
     static func remoteBase(_ host: String) -> String {
         "ssh -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new \(host.shellQuoted)"
     }
@@ -201,15 +259,81 @@ enum AgentFiles {
     static func fetchRemoteStatus(_ panel: AgentPanel) -> AgentStatus? {
         guard let host = panel.host, host.contains("@") else { return nil }
         let url = panel.statusURL.isEmpty ? "http://127.0.0.1:8765/status" : panel.statusURL
-        let out = Shell.runLogin("\(remoteBase(host)) \("curl -s --max-time 5 \(url)".shellQuoted)")
-        guard let data = out.data(using: .utf8),
+        // When the port is down the agent has exited — and its last act is to
+        // write `status: stopped` to its state.json beside the config. Read
+        // that instead, or the cache keeps the final *live* body ("sweeping",
+        // stamped seconds before Stop) and the tile says Running for the 180s
+        // it takes that stamp to go stale.
+        var far = "curl -s --max-time 5 \(url)"
+        // The VM's config.json rides along in the same ssh session and lands
+        // in the tile's configPath — a local MIRROR of the file the agent
+        // will read at its next cycle. Only a live /status carries a `config`
+        // block; a stopped agent's state.json does not, so without this the
+        // auto-resume switch (and model/effort) read `nil ?? true` every
+        // poll and snapped back ON seconds after being turned off, while the
+        // write over ssh had in fact landed. The file is the truth; show it.
+        if let cfg = panel.remoteConfigPath, !cfg.isEmpty {
+            let state = ((cfg as NSString).deletingLastPathComponent as NSString)
+                .appendingPathComponent("state.json")
+            far = "(\(far) || cat \(state.shellQuoted)); printf '\\n\(configMarker)\\n'; cat \(cfg.shellQuoted) 2>/dev/null"
+        }
+        let out = Shell.runLogin("\(remoteBase(host)) \(far.shellQuoted)")
+        let parts = out.components(separatedBy: "\n\(configMarker)\n")
+        guard let data = parts[0].data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let status = AgentStatus(json: json) else { return nil }
         let path = panel.expandedStatePath
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? data.write(to: URL(fileURLWithPath: path))
+        if parts.count > 1, let cdata = parts[1].data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: cdata) as? [String: Any]) != nil {
+            try? cdata.write(to: URL(fileURLWithPath: panel.expandedConfigPath))
+        }
         return status
+    }
+
+    /// Separates the status body from the config body in one ssh round trip.
+    private static let configMarker = "@@launchdeck-config@@"
+
+    /// Merge ONE key into a remote agent's config.json over ssh, preserving the
+    /// rest of the file — the same "touch only your key" rule as writeConfig,
+    /// done on the far side with python3 (present: the agent runs on it). The
+    /// agent re-reads its config every cycle, so the change lands on the next
+    /// one. Returns (exit status, output) so the caller can log a failure.
+    static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, value: Bool)
+        -> (status: Int32, output: String) {
+        writeRemoteConfigKey(panel, key: key, json: value ? "true" : "false")
+    }
+
+    static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, value: Int)
+        -> (status: Int32, output: String) {
+        writeRemoteConfigKey(panel, key: key, json: String(value))
+    }
+
+    /// `json` is the value as JSON text (`true`, `85`); the far side decodes it.
+    static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, json: String)
+        -> (status: Int32, output: String) {
+        guard let host = panel.host, host.contains("@"),
+              let path = panel.remoteConfigPath, !path.isEmpty else {
+            return (1, "Set agent.host and agent.remoteConfigPath in apps.json first.")
+        }
+        let py = """
+        import json, os, sys
+        p = sys.argv[1]; k = sys.argv[2]; v = json.loads(sys.argv[3])
+        try:
+            d = json.load(open(p))
+        except Exception:
+            d = {}
+        d[k] = v
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        t = p + ".tmp"
+        json.dump(d, open(t, "w"), indent=1, sort_keys=True)
+        os.replace(t, p)
+        print("ok")
+        """
+        let far = "python3 -c \(py.shellQuoted) \(path.shellQuoted) \(key.shellQuoted) \(json.shellQuoted)"
+        return Shell.runLoginResult("\(remoteBase(host)) \(far.shellQuoted)")
     }
 
     /// The remote service's recent journal, for the Logs button. Returns the
@@ -232,11 +356,17 @@ enum AgentFiles {
         guard let data = FileManager.default.contents(atPath: panel.expandedConfigPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return fallback }
+        // The agent used to have one cap for both windows; an older file
+        // still may. It fills whichever of the two the file lacks.
+        let legacy = (json["max_utilization_pct"] as? NSNumber)?.intValue
         return AgentConfig(model: json["model"] as? String ?? fallback.model,
-                           effort: json["effort"] as? String ?? fallback.effort)
+                           effort: json["effort"] as? String ?? fallback.effort,
+                           resumeAfterLimit: json["resume_after_limit"] as? Bool ?? true,
+                           fiveHourCapPct: (json["max_five_hour_pct"] as? NSNumber)?.intValue ?? legacy ?? 90,
+                           sevenDayCapPct: (json["max_seven_day_pct"] as? NSNumber)?.intValue ?? legacy ?? 90)
     }
 
-    /// Merge model/effort into the existing file, preserving every other key.
+    /// Merge the tile's keys into the existing file, preserving every other key.
     static func writeConfig(_ panel: AgentPanel, _ cfg: AgentConfig) {
         let path = panel.expandedConfigPath
         var json: [String: Any] = [:]
@@ -246,6 +376,10 @@ enum AgentFiles {
         }
         json["model"] = cfg.model
         json["effort"] = cfg.effort
+        json["resume_after_limit"] = cfg.resumeAfterLimit
+        json["max_five_hour_pct"] = cfg.fiveHourCapPct
+        json["max_seven_day_pct"] = cfg.sevenDayCapPct
+        json["max_utilization_pct"] = nil   // superseded by the two above
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
