@@ -61,9 +61,11 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 7) {
                 sectionHeader("Claude Plan", trailing: usageHeaderTrailing)
                 Card {
-                    limitRow(label: "5-hour limit", window: manager.aiUsage?.fiveHour)
+                    limitRow(label: "5-hour limit", window: manager.aiUsage?.fiveHour,
+                             caps: agentCaps { $0.fiveHourCapPct })
                     Divider().background(IOS.separator).padding(.leading, 16)
-                    limitRow(label: "Weekly limit", window: manager.aiUsage?.sevenDay)
+                    limitRow(label: "Weekly limit", window: manager.aiUsage?.sevenDay,
+                             caps: agentCaps { $0.sevenDayCapPct })
                 }
                 usageFooter
             }
@@ -85,14 +87,31 @@ struct ContentView: View {
         .help("Fetch the live account usage now (free — it refreshes every minute anyway)")
     }
 
-    private func limitRow(label: String, window: UsageWindow?) -> some View {
+    /// Where each agent tile pauses in this window: (app name, cap %), one
+    /// per agent, from the same config the tile's fields show — so the tick
+    /// on the plan bar is the number that was typed there.
+    private func agentCaps(_ pick: (AgentConfig) -> Int) -> [(name: String, pct: Int)] {
+        manager.apps.compactMap { app in
+            guard app.agent != nil, let cfg = manager.agentConfigs[app.id] else { return nil }
+            return (app.name, pick(cfg))
+        }
+    }
+
+    private func limitRow(label: String, window: UsageWindow?,
+                          caps: [(name: String, pct: Int)] = []) -> some View {
         let pct = window?.pct
+        let lowestCap = caps.map(\.pct).min()
         let tint: Color = {
             guard let v = pct else { return IOS.gray }
             if v >= 90 { return IOS.red }
             if v >= 70 { return IOS.orange }
+            if let c = lowestCap, v >= Double(c) { return IOS.orange }   // an agent is parked here
             return IOS.blue
         }()
+        let distinct = Array(Set(caps.map(\.pct))).sorted()
+        let capText: String? = distinct.isEmpty ? nil
+            : (distinct.count == 1 ? "Agent pauses at \(distinct[0])%"
+                                   : "Agents pause at " + distinct.map { "\($0)%" }.joined(separator: " · "))
         return HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
@@ -101,6 +120,12 @@ struct ContentView: View {
                 Text(window?.resetsAt.map { "Resets \(PlanUsageInline.resetText($0))" } ?? "No reading yet")
                     .font(.system(size: 11))
                     .foregroundStyle(IOS.secondary)
+                if let capText {
+                    Text(capText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(IOS.orange)
+                        .help(caps.map { "\($0.name): \($0.pct)%" }.joined(separator: "\n"))
+                }
             }
             .frame(width: 130, alignment: .leading)
             ZStack(alignment: .leading) {
@@ -108,6 +133,15 @@ struct ContentView: View {
                 GeometryReader { geo in
                     Capsule().fill(tint)
                         .frame(width: geo.size.width * min(max((pct ?? 0) / 100, 0), 1), height: 6)
+                    // The cap ticks: where an agent stops starting cycles.
+                    ForEach(distinct, id: \.self) { c in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(IOS.orange)
+                            .frame(width: 2, height: 12)
+                            .position(x: geo.size.width * CGFloat(c) / 100, y: 3)
+                            .help(caps.filter { $0.pct == c }.map { "\($0.name) pauses at \(c)%" }
+                                      .joined(separator: "\n"))
+                    }
                 }
                 .frame(height: 6)
             }
@@ -457,16 +491,47 @@ struct AppRow: View {
 
     /// Where the agent stops starting cycles: one dial for the five-hour
     /// session window, one for the week. It reads the file's values (the
-    /// mirror, for a remote agent) and writes on Enter or when the field
-    /// loses focus, so a half-typed number never lands.
+    /// mirror, for a remote agent); typing only fills a draft, and Save
+    /// (or Enter) writes both — so a half-typed number never lands and the
+    /// person sees exactly when it did.
     private func capsRow(_ panel: AgentPanel) -> some View {
         let cfg = agentConfig ?? AgentConfig(model: "", effort: "")
+        let k5 = "\(app.id):five_hour", k7 = "\(app.id):seven_day"
+        let d5 = capDrafts.wrappedValue[k5], d7 = capDrafts.wrappedValue[k7]
+        let n5 = d5.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let n7 = d7.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let valid5 = n5.map { AgentConfig.capRange.contains($0) } ?? true
+        let valid7 = n7.map { AgentConfig.capRange.contains($0) } ?? true
+        let dirty = (n5 != nil && n5 != cfg.fiveHourCapPct) || (n7 != nil && n7 != cfg.sevenDayCapPct)
+        let save = {
+            guard valid5 && valid7 else { return }
+            onAgentCaps(n5 == cfg.fiveHourCapPct ? nil : n5, n7 == cfg.sevenDayCapPct ? nil : n7)
+            capDrafts.wrappedValue[k5] = nil
+            capDrafts.wrappedValue[k7] = nil
+        }
         return HStack(spacing: 10) {
             Text("Pause at").font(.system(size: 11)).foregroundStyle(IOS.secondary)
-            CapField(label: "5-hour", key: "\(app.id):five_hour", value: cfg.fiveHourCapPct,
-                     drafts: capDrafts) { onAgentCaps($0, nil) }
-            CapField(label: "7-day", key: "\(app.id):seven_day", value: cfg.sevenDayCapPct,
-                     drafts: capDrafts) { onAgentCaps(nil, $0) }
+            CapField(label: "5-hour", key: k5, value: cfg.fiveHourCapPct, valid: valid5,
+                     drafts: capDrafts, onSubmit: save)
+            CapField(label: "7-day", key: k7, value: cfg.sevenDayCapPct, valid: valid7,
+                     drafts: capDrafts, onSubmit: save)
+            let canSave = dirty && valid5 && valid7
+            Button("Save", action: save)
+                .buttonStyle(PillButton(tint: canSave ? IOS.blue : IOS.gray, width: nil))
+                .disabled(!canSave)
+                .help(!dirty ? "Type a new cap, then Save"
+                      : (valid5 && valid7
+                         ? "Write both caps to the agent's config (it checks them at the top of every cycle)"
+                         : "Caps are 1–100"))
+            if dirty {
+                Button("Revert") {
+                    capDrafts.wrappedValue[k5] = nil
+                    capDrafts.wrappedValue[k7] = nil
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(IOS.secondary)
+            }
             Spacer()
         }
         .disabled(!panel.configWritable)
@@ -591,20 +656,19 @@ enum PlanUsageInline {
 /// A percent field for one of the agent's caps. The text being typed lives
 /// in the manager's `capDrafts` (bare swiftc has no @State) so the poll,
 /// which refreshes `value` from the config file every tick, can't overwrite
-/// a number mid-keystroke. Commits a valid 1–100 on Enter or focus loss and
-/// otherwise snaps back to `value`.
+/// it mid-keystroke. It never writes on its own: Enter calls the row's Save,
+/// and an out-of-range draft turns the field red until fixed or reverted.
 private struct CapField: View {
     let label: String
     let key: String
     let value: Int
+    let valid: Bool
     let drafts: Binding<[String: String]>
-    let onCommit: (Int) -> Void
-
-    @FocusState private var focused: Bool
+    let onSubmit: () -> Void
 
     private var text: Binding<String> {
         Binding(get: { drafts.wrappedValue[key] ?? String(value) },
-                set: { drafts.wrappedValue[key] = $0 })
+                set: { drafts.wrappedValue[key] = $0 == String(value) ? nil : $0 })
     }
 
     var body: some View {
@@ -615,19 +679,10 @@ private struct CapField: View {
                 .controlSize(.mini)
                 .font(.system(size: 11, design: .monospaced))
                 .multilineTextAlignment(.trailing)
+                .foregroundStyle(valid ? IOS.label : IOS.red)
                 .frame(width: 36)
-                .focused($focused)
-                .onSubmit { commit() }
-                .onChange(of: focused) { isFocused in if !isFocused { commit() } }
+                .onSubmit(onSubmit)
             Text("%").font(.system(size: 11)).foregroundStyle(IOS.secondary)
-        }
-    }
-
-    private func commit() {
-        guard let draft = drafts.wrappedValue[key] else { return }   // nothing typed
-        drafts.wrappedValue[key] = nil
-        if let n = Int(draft.trimmingCharacters(in: .whitespaces)), AgentConfig.capRange.contains(n), n != value {
-            onCommit(n)
         }
     }
 }
