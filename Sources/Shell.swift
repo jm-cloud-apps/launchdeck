@@ -303,13 +303,24 @@ enum AgentFiles {
     /// one. Returns (exit status, output) so the caller can log a failure.
     static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, value: Bool)
         -> (status: Int32, output: String) {
+        writeRemoteConfigKey(panel, key: key, json: value ? "true" : "false")
+    }
+
+    static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, value: Int)
+        -> (status: Int32, output: String) {
+        writeRemoteConfigKey(panel, key: key, json: String(value))
+    }
+
+    /// `json` is the value as JSON text (`true`, `85`); the far side decodes it.
+    static func writeRemoteConfigKey(_ panel: AgentPanel, key: String, json: String)
+        -> (status: Int32, output: String) {
         guard let host = panel.host, host.contains("@"),
               let path = panel.remoteConfigPath, !path.isEmpty else {
             return (1, "Set agent.host and agent.remoteConfigPath in apps.json first.")
         }
         let py = """
         import json, os, sys
-        p = sys.argv[1]; k = sys.argv[2]; v = sys.argv[3] == "true"
+        p = sys.argv[1]; k = sys.argv[2]; v = json.loads(sys.argv[3])
         try:
             d = json.load(open(p))
         except Exception:
@@ -321,7 +332,7 @@ enum AgentFiles {
         os.replace(t, p)
         print("ok")
         """
-        let far = "python3 -c \(py.shellQuoted) \(path.shellQuoted) \(key.shellQuoted) \(value ? "true" : "false")"
+        let far = "python3 -c \(py.shellQuoted) \(path.shellQuoted) \(key.shellQuoted) \(json.shellQuoted)"
         return Shell.runLoginResult("\(remoteBase(host)) \(far.shellQuoted)")
     }
 
@@ -345,9 +356,14 @@ enum AgentFiles {
         guard let data = FileManager.default.contents(atPath: panel.expandedConfigPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return fallback }
+        // The agent used to have one cap for both windows; an older file
+        // still may. It fills whichever of the two the file lacks.
+        let legacy = (json["max_utilization_pct"] as? NSNumber)?.intValue
         return AgentConfig(model: json["model"] as? String ?? fallback.model,
                            effort: json["effort"] as? String ?? fallback.effort,
-                           resumeAfterLimit: json["resume_after_limit"] as? Bool ?? true)
+                           resumeAfterLimit: json["resume_after_limit"] as? Bool ?? true,
+                           fiveHourCapPct: (json["max_five_hour_pct"] as? NSNumber)?.intValue ?? legacy ?? 90,
+                           sevenDayCapPct: (json["max_seven_day_pct"] as? NSNumber)?.intValue ?? legacy ?? 90)
     }
 
     /// Merge the tile's keys into the existing file, preserving every other key.
@@ -361,6 +377,9 @@ enum AgentFiles {
         json["model"] = cfg.model
         json["effort"] = cfg.effort
         json["resume_after_limit"] = cfg.resumeAfterLimit
+        json["max_five_hour_pct"] = cfg.fiveHourCapPct
+        json["max_seven_day_pct"] = cfg.sevenDayCapPct
+        json["max_utilization_pct"] = nil   // superseded by the two above
         try? FileManager.default.createDirectory(
             atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {

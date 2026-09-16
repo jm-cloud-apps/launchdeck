@@ -125,7 +125,8 @@ struct AgentStatus: Equatable {
     var sessionsSwept: Int
     var model: String?           // what the agent is running (for the read-only remote tile)
     var effort: String?
-    var capPct: Double?          // config.max_utilization_pct, when the payload carries config
+    var fiveHourCapPct: Int?     // config.max_five_hour_pct, when the payload carries config
+    var sevenDayCapPct: Int?     // config.max_seven_day_pct
     var resumeAfterLimit: Bool?  // config.resume_after_limit — the VM's own setting, for the remote toggle
     var updatedAt: Date?         // state's own timestamp — drives the "via VM · Xs ago" freshness
 
@@ -141,7 +142,8 @@ struct AgentStatus: Equatable {
         model = json["model"] as? String
         effort = json["effort"] as? String
         let cfg = json["config"] as? [String: Any]
-        capPct = cfg?["max_utilization_pct"] as? Double
+        fiveHourCapPct = (cfg?["max_five_hour_pct"] as? NSNumber)?.intValue
+        sevenDayCapPct = (cfg?["max_seven_day_pct"] as? NSNumber)?.intValue
         resumeAfterLimit = cfg?["resume_after_limit"] as? Bool
         if let t = json["updated_at"] as? Double { updatedAt = Date(timeIntervalSince1970: t) }
     }
@@ -150,11 +152,17 @@ struct AgentStatus: Equatable {
 /// The fields the tile's controls own, read back from the agent's config
 /// file each poll so a hand edit shows up too. `resumeAfterLimit` is what the
 /// agent does at its usage cap: wait for the window and carry on (true, the
-/// default), or park until Start is pressed again (false).
+/// default), or park until Start is pressed again (false). The two caps are
+/// the plan utilization at which it stops starting cycles — one for the
+/// five-hour session window, one for the week — so the rest is yours.
 struct AgentConfig: Equatable {
     var model: String
     var effort: String
     var resumeAfterLimit: Bool = true
+    var fiveHourCapPct: Int = 90
+    var sevenDayCapPct: Int = 90
+
+    static let capRange = 1...100
 }
 
 /// One launchable project. Decoded from apps.json so you can add apps

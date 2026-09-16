@@ -157,6 +157,11 @@ final class AppManager: ObservableObject {
     @Published var dropTarget: String?
     @Published var dropAtEnd = false
 
+    /// Text being typed into an agent's cap fields, keyed "<app id>:<window>"
+    /// — same reason as above (no @State), and it keeps the 2.5s poll from
+    /// overwriting a number mid-keystroke. Cleared on commit.
+    @Published var capDrafts: [String: String] = [:]
+
     /// Drag-to-reorder: put the app with `id` where `target` currently sits
     /// (before it), shifting the rest. Persisted at once so the order survives
     /// a relaunch; the status maps are keyed by id, so nothing else moves.
@@ -261,6 +266,50 @@ final class AppManager: ObservableObject {
         var cfg = agentConfigs[app.id] ?? AgentFiles.readConfig(panel)
         cfg.resumeAfterLimit = on
         agentConfigs[app.id] = cfg
+        DispatchQueue.global(qos: .userInitiated).async {
+            AgentFiles.writeConfig(panel, cfg)
+        }
+    }
+
+    /// Set the utilization at which the agent stops starting cycles — the
+    /// five-hour session window and the seven-day week have their own, so
+    /// "leave me some of this session" and "leave me some of this week" are
+    /// separate dials. Clamped to 1–100. Local: merged into the config file;
+    /// remote: each changed key merged into the VM's file over ssh, with the
+    /// local mirror updated first so the row doesn't snap back before the
+    /// next fetch. The agent checks at the top of every cycle.
+    func setAgentCaps(_ app: ManagedApp, fiveHour: Int? = nil, sevenDay: Int? = nil) {
+        guard let panel = app.agent, panel.configWritable else { return }
+        var cfg = agentConfigs[app.id] ?? AgentFiles.readConfig(panel)
+        var changed: [(key: String, value: Int)] = []
+        if let v = fiveHour.map({ min(max($0, AgentConfig.capRange.lowerBound), AgentConfig.capRange.upperBound) }),
+           v != cfg.fiveHourCapPct {
+            cfg.fiveHourCapPct = v; changed.append(("max_five_hour_pct", v))
+        }
+        if let v = sevenDay.map({ min(max($0, AgentConfig.capRange.lowerBound), AgentConfig.capRange.upperBound) }),
+           v != cfg.sevenDayCapPct {
+            cfg.sevenDayCapPct = v; changed.append(("max_seven_day_pct", v))
+        }
+        guard !changed.isEmpty else { return }
+        agentConfigs[app.id] = cfg
+        appendLog(app, "AGENT CONFIG — cap 5-hour \(cfg.fiveHourCapPct)%, 7-day \(cfg.sevenDayCapPct)% (checked at the next cycle)")
+        if panel.remote {
+            AgentFiles.writeConfig(panel, cfg)      // the mirror
+            lastRemoteFetch[app.id] = nil
+            DispatchQueue.global(qos: .userInitiated).async {
+                for (key, value) in changed {
+                    let r = AgentFiles.writeRemoteConfigKey(panel, key: key, value: value)
+                    if r.status != 0 {
+                        let detail = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        DispatchQueue.main.async {
+                            self.appendLog(app, "REMOTE config write failed (exit \(r.status))" +
+                                                (detail.isEmpty ? "" : " — \(detail)"))
+                        }
+                    }
+                }
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             AgentFiles.writeConfig(panel, cfg)
         }

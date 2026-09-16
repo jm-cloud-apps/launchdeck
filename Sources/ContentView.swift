@@ -160,6 +160,7 @@ struct ContentView: View {
                         scheduleBusy: manager.scheduleBusy.contains(app.id),
                         agentStatus: manager.agentStatuses[app.id],
                         agentConfig: manager.agentConfigs[app.id],
+                        capDrafts: $manager.capDrafts,
                         isDropTarget: manager.dropTarget == app.id,
                         onStart: { manager.start(app) },
                         onStop: { manager.stop(app) },
@@ -169,7 +170,8 @@ struct ContentView: View {
                         onSchedule: { manager.setScheduled(app, enabled: $0) },
                         onAgentModel: { manager.setAgentConfig(app, model: $0) },
                         onAgentEffort: { manager.setAgentConfig(app, effort: $0) },
-                        onAgentResume: { manager.setAgentResume(app, $0) }
+                        onAgentResume: { manager.setAgentResume(app, $0) },
+                        onAgentCaps: { manager.setAgentCaps(app, fiveHour: $0, sevenDay: $1) }
                     )
                     // Drop a dragged row here: it lands before this one.
                     .dropDestination(for: String.self) { items, _ in
@@ -229,6 +231,7 @@ struct AppRow: View {
     let scheduleBusy: Bool
     let agentStatus: AgentStatus?
     let agentConfig: AgentConfig?
+    let capDrafts: Binding<[String: String]>
     let isDropTarget: Bool
     let onStart: () -> Void
     let onStop: () -> Void
@@ -239,6 +242,7 @@ struct AppRow: View {
     let onAgentModel: (String) -> Void
     let onAgentEffort: (String) -> Void
     let onAgentResume: (Bool) -> Void
+    let onAgentCaps: (Int?, Int?) -> Void
 
     /// The app's colour fills its icon square, the way Settings does — and
     /// nothing else. State is what colours the rest: green running, orange
@@ -395,6 +399,7 @@ struct AppRow: View {
                     resumeRow(panel)
                     Spacer()
                 }
+                capsRow(panel)
                 .help(panel.remote
                       ? (panel.host.map { "Runs on \($0) — set model/effort over ssh" }
                          ?? "Runs on the VM — set model/effort over ssh")
@@ -448,6 +453,24 @@ struct AppRow: View {
             Text(label).font(.system(size: 11)).foregroundStyle(IOS.secondary)
             Text(value).font(.system(size: 11, weight: .semibold)).foregroundStyle(IOS.label.opacity(0.85))
         }
+    }
+
+    /// Where the agent stops starting cycles: one dial for the five-hour
+    /// session window, one for the week. It reads the file's values (the
+    /// mirror, for a remote agent) and writes on Enter or when the field
+    /// loses focus, so a half-typed number never lands.
+    private func capsRow(_ panel: AgentPanel) -> some View {
+        let cfg = agentConfig ?? AgentConfig(model: "", effort: "")
+        return HStack(spacing: 10) {
+            Text("Pause at").font(.system(size: 11)).foregroundStyle(IOS.secondary)
+            CapField(label: "5-hour", key: "\(app.id):five_hour", value: cfg.fiveHourCapPct,
+                     drafts: capDrafts) { onAgentCaps($0, nil) }
+            CapField(label: "7-day", key: "\(app.id):seven_day", value: cfg.sevenDayCapPct,
+                     drafts: capDrafts) { onAgentCaps(nil, $0) }
+            Spacer()
+        }
+        .disabled(!panel.configWritable)
+        .help("Plan utilization at which the agent stops starting new cycles in that window — the rest is yours. Checked at the top of every cycle; a cycle in flight finishes.")
     }
 
     private func agentPicker(label: String, value: String, options: [String],
@@ -562,5 +585,49 @@ enum PlanUsageInline {
         if s < 86400 { let h = s / 3600; return "\(h) hour\(h == 1 ? "" : "s") ago" }
         let d = s / 86400
         return "\(d) day\(d == 1 ? "" : "s") ago"
+    }
+}
+
+/// A percent field for one of the agent's caps. The text being typed lives
+/// in the manager's `capDrafts` (bare swiftc has no @State) so the poll,
+/// which refreshes `value` from the config file every tick, can't overwrite
+/// a number mid-keystroke. Commits a valid 1–100 on Enter or focus loss and
+/// otherwise snaps back to `value`.
+private struct CapField: View {
+    let label: String
+    let key: String
+    let value: Int
+    let drafts: Binding<[String: String]>
+    let onCommit: (Int) -> Void
+
+    @FocusState private var focused: Bool
+
+    private var text: Binding<String> {
+        Binding(get: { drafts.wrappedValue[key] ?? String(value) },
+                set: { drafts.wrappedValue[key] = $0 })
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text(label).font(.system(size: 11)).foregroundStyle(IOS.secondary)
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.mini)
+                .font(.system(size: 11, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 36)
+                .focused($focused)
+                .onSubmit { commit() }
+                .onChange(of: focused) { isFocused in if !isFocused { commit() } }
+            Text("%").font(.system(size: 11)).foregroundStyle(IOS.secondary)
+        }
+    }
+
+    private func commit() {
+        guard let draft = drafts.wrappedValue[key] else { return }   // nothing typed
+        drafts.wrappedValue[key] = nil
+        if let n = Int(draft.trimmingCharacters(in: .whitespaces)), AgentConfig.capRange.contains(n), n != value {
+            onCommit(n)
+        }
     }
 }
