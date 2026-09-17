@@ -159,7 +159,7 @@ struct ContentView: View {
     /// replacing it, because the last good numbers are still what's shown.
     private var usageFooter: some View {
         let stamp: String = manager.aiUsage.map {
-            "Last refreshed \(PlanUsageInline.ageText($0.observedAt)) · via \($0.source) · refreshes every minute"
+            "Last refreshed \(PlanUsageInline.ageText($0.observedAt)) · via \($0.source) · refreshes every \(Int(AppManager.usageInterval / 60)) min"
         } ?? "No reading yet — press ↻ to fetch the live account usage."
         return HStack(spacing: 0) {
             Text(stamp)
@@ -327,6 +327,16 @@ struct AppRow: View {
                             .disabled(!controlReady)
                             .opacity(controlReady ? 1 : 0.45)
                             .help(controlHelp ?? "Start")
+                    } else if parkedAtCap {
+                        // Parked with auto-resume off: the process is alive
+                        // but will never move by itself, so the one thing to
+                        // offer is the restart that clears `halted` — not a
+                        // Stop that then needs a Start. Stop is in the menu.
+                        Button("Resume", action: onRestart)
+                            .buttonStyle(PillButton(tint: IOS.blue))
+                            .disabled(!controlReady)
+                            .opacity(controlReady ? 1 : 0.45)
+                            .help(controlHelp ?? "Restart the agent so it spends the next window")
                     } else {
                         Button("Stop", action: onStop)
                             .buttonStyle(PillButton(tint: IOS.red))
@@ -341,6 +351,9 @@ struct AppRow: View {
                     Menu {
                         Button("Restart", action: onRestart)
                             .disabled(status == .stopped || !controlReady)
+                        if parkedAtCap {
+                            Button("Stop", action: onStop).disabled(!controlReady)
+                        }
                         Button(app.agent?.remote == true ? "View VM journal" : "View log", action: onLogs)
                         if app.url != nil {
                             Button("Open in browser", action: onOpen).disabled(status != .running)
@@ -476,7 +489,7 @@ struct AppRow: View {
         }
         .help(panel.configWritable
               ? (value ? "At the usage cap the agent waits for the window to reset, then continues."
-                       : "At the usage cap the agent parks until you press Start — the next window is yours.")
+                       : "At the usage cap the agent parks until you press Resume — the next window is yours.")
               : "Set agent.host and agent.remoteConfigPath in apps.json to change this over ssh")
     }
 
@@ -572,7 +585,7 @@ struct AppRow: View {
         let prefix: String
         switch s.status {
         case "paused_limit":    prefix = "Paused"
-        case "halted_limit":    prefix = "Halted"
+        case "halted_limit":    prefix = "Halted"   // the pill's Resume restarts it
         case "halted_error":    prefix = "Halted"   // the breaker tripped; detail says why
         case "waiting_backend": prefix = "Waiting"
         case "sweeping":        prefix = "Sweeping"
@@ -602,7 +615,18 @@ struct AppRow: View {
         return "\(s / 86400)d"
     }
 
+    /// The agent is up but parked at the usage cap with auto-resume off
+    /// (`halted_limit`): alive enough to Stop, but the pill saying "Running"
+    /// and offering Stop read as "working" — and getting it going again took
+    /// Stop then Start. Only a fresh reading counts: a stale remote file is
+    /// already handled by the freshness verdict, and a local agent's status
+    /// only arrives while its port is up.
+    private var parkedAtCap: Bool {
+        status == .running && agentStatus?.status == "halted_limit"
+    }
+
     private var stateColor: Color {
+        if parkedAtCap { return IOS.orange }
         switch status {
         case .running: return IOS.green
         case .starting: return IOS.orange
@@ -614,6 +638,7 @@ struct AppRow: View {
     /// Dot + word, in the state colour; muted when there is nothing to say.
     private var statusLabel: some View {
         let text: String = {
+            if parkedAtCap { return "Halted" }
             switch status {
             case .running: return "Running"
             case .starting: return "Starting"

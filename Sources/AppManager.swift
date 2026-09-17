@@ -40,10 +40,13 @@ final class AppManager: ObservableObject {
     private var lastRemoteFetch: [String: Date] = [:]
     private var timer: Timer?
     private var usageTimer: Timer?
-    /// How often the live usage fetch runs. The endpoint costs no limit, but
-    /// the numbers only move as fast as requests are made, so a minute is
-    /// plenty — and it keeps the keychain read off the 2.5s poll.
-    static let usageInterval: TimeInterval = 60
+    /// How often the live usage fetch runs. The endpoint costs no limit but
+    /// rate-limits per ACCOUNT, and this app shares that budget with the
+    /// Claude desktop app and Claude Code's own status line — at a minute the
+    /// deck was the one earning 429s. Three minutes is still faster than the
+    /// numbers meaningfully move (a cycle is ~10 min), and it keeps the
+    /// keychain read off the 2.5s poll.
+    static let usageInterval: TimeInterval = 180
 
     init() {
         apps = AppConfig.load()
@@ -186,8 +189,11 @@ final class AppManager: ObservableObject {
 
     /// After a 429 the timer skips fetches until this passes (the ↻ button
     /// still forces one) — the endpoint rate-limits per account, and every
-    /// relaunch fetches at once, so a burst of them earns a pause.
+    /// relaunch fetches at once, so a burst of them earns a pause. The pause
+    /// honours the server's Retry-After when it sends one, else doubles on
+    /// each consecutive 429 (5 → 10 → 20 → 30 min) and resets on a reading.
     private var usageBackoffUntil: Date?
+    private var usageBackoffStep = 0
 
     /// Fetch the live account usage — on the timer and from the ↻ button.
     /// Off the main thread: the keychain read and the request both block.
@@ -202,14 +208,18 @@ final class AppManager: ObservableObject {
                 switch result {
                 case .reading(let u):
                     self.usageError = nil
+                    self.usageBackoffStep = 0
                     self.aiUsage = u
                 case .failed(let why):
                     // Keep showing the last reading; the footer says why it
                     // is not moving.
                     self.usageError = why
-                    if why.hasPrefix("rate limited") {
-                        self.usageBackoffUntil = Date().addingTimeInterval(5 * 60)
-                    }
+                case .rateLimited(let retryAfter):
+                    let backoff = retryAfter
+                        ?? min(30 * 60, 5 * 60 * pow(2.0, Double(self.usageBackoffStep)))
+                    self.usageBackoffStep += 1
+                    self.usageBackoffUntil = Date().addingTimeInterval(backoff)
+                    self.usageError = "rate limited by the usage endpoint — next try in \(Int(backoff / 60)) min"
                 }
             }
         }

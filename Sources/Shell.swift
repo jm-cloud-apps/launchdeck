@@ -130,6 +130,8 @@ enum PlanUsage {
     enum LiveResult {
         case reading(AIUsage)
         case failed(String)
+        /// HTTP 429, with the server's Retry-After in seconds when it sent one.
+        case rateLimited(retryAfter: TimeInterval?)
     }
 
     /// Ask the account for the live numbers — the same endpoint the Claude
@@ -149,11 +151,16 @@ enum PlanUsage {
         let done = DispatchSemaphore(value: 0)
         var body: Data?
         var code = 0
+        var retryAfter: TimeInterval?
         var failure: String?
         URLSession.shared.dataTask(with: request) { data, response, error in
             defer { done.signal() }
             body = data
-            code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let http = response as? HTTPURLResponse
+            code = http?.statusCode ?? 0
+            if let ra = http?.value(forHTTPHeaderField: "Retry-After"), let s = TimeInterval(ra) {
+                retryAfter = s
+            }
             failure = error?.localizedDescription
         }.resume()
         _ = done.wait(timeout: .now() + 10)
@@ -163,7 +170,7 @@ enum PlanUsage {
         }
         if code == 429 {
             // The endpoint has its own rate limit; the caller backs off.
-            return .failed("rate limited by the usage endpoint — retrying in a few minutes")
+            return .rateLimited(retryAfter: retryAfter)
         }
         guard code == 200, let body,
               let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
