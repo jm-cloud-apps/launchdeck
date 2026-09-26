@@ -445,6 +445,23 @@ let defaultApps: [ManagedApp] = [
         url: "http://localhost:4181"
     ),
     ManagedApp(
+        name: "Pianify",
+        subtitle: "Piano practice · :4182",
+        icon: "pianokeys",
+        color: "e0774a",
+        directory: "\(githubRoot)/pianify",
+        // Vanilla ES modules, no build step. Served over http rather than opened
+        // as a file:// page because module imports and the microphone (which the
+        // Key Drill uses to hear the keyboard) both need a real origin —
+        // localhost counts as a secure context. Its own stdlib server rather than
+        // `staticServer`, because it also saves progress to data/progress.json.
+        startCommand: "python3 server.py --port 4182",
+        stopCommand: nil,
+        ports: [4182],
+        readyPort: 4182,
+        url: "http://localhost:4182"
+    ),
+    ManagedApp(
         name: "EP Sweep Agent",
         subtitle: "QuantForge · claude sweeps · :8765",
         icon: "sparkles",

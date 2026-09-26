@@ -6,7 +6,7 @@ projects. Each tile starts/stops a project and shows whether it's running.
 Ships configured for **QuantForge** (:5173), **Budgeteer** (:5174), **Study App**
 (:5180), **PlantForge** (:5190), **Elevator Clicker** (:5185), **Housing
 Calculator** (:4174), **InventoryForge** (:4175), **Trade Templates**
-(:4181), and QuantForge's **EP Sweep Agent** (:8765).
+(:4181), **Pianify** (:4182), and QuantForge's **EP Sweep Agent** (:8765).
 
 ## Build & run
 
