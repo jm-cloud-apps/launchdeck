@@ -187,7 +187,7 @@ icon square; the status dot and the Stop pill take the state colour. Don't
 reintroduce per-app coloured buttons or glows.
 
 A plain row is ~50pt; a `schedule` adds a line, an `agent` two. `.defaultSize`
-(860×780) fits the current 9 apps (10 with Pianify — the `ScrollView` covers the overflow); the `ScrollView` is the fallback.
+(860×780) fits the current 9 apps (11 with Pianify and the Instagram Guide — the `ScrollView` covers the overflow); the `ScrollView` is the fallback.
 `build.sh` compiles with bare `swiftc`, which lacks the macro plugin the
 current SDK's `@State` needs — so transient view state (the drag-over
 highlight) lives on `AppManager` as `@Published`, not as `@State`.

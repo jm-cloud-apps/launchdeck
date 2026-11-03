@@ -462,6 +462,21 @@ let defaultApps: [ManagedApp] = [
         url: "http://localhost:4182"
     ),
     ManagedApp(
+        name: "Instagram Guide",
+        subtitle: "darktable-styles · posting guide · :4183",
+        icon: "camera.aperture",
+        color: "f97316",
+        directory: "\(githubRoot)/darktable-styles",
+        // Serves the repo root, not guide/, because the page reads ../CATALOG.md
+        // and the ../previews/ JPEGs live, so the style catalog never drifts from
+        // what build.py and verify.py last wrote.
+        startCommand: staticServer(port: 4183),
+        stopCommand: nil,
+        ports: [4183],
+        readyPort: 4183,
+        url: "http://localhost:4183/guide/"
+    ),
+    ManagedApp(
         name: "EP Sweep Agent",
         subtitle: "QuantForge · claude sweeps · :8765",
         icon: "sparkles",
