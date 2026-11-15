@@ -11,10 +11,10 @@ struct LaunchDeckApp: App {
         Window("Launch Deck", id: "main") {
             ContentView(manager: manager)
         }
-        // Wide enough for 3 tile columns plus the plan-usage strip on the
-        // header line; tall enough that the current deck (9 apps → 3 rows,
-        // one ~40pt taller for the agent tile) shows without scrolling.
-        .defaultSize(width: 960, height: 720)
+        // One row per app (~46pt, ~86pt for an agent row): the current deck
+        // of 9 fits without scrolling; the width is for the header's usage
+        // strip and a name column that never truncates.
+        .defaultSize(width: 860, height: 780)
         .windowResizability(.contentMinSize)
 
         MenuBarExtra("Launch Deck", systemImage: "gamecontroller.fill") {
